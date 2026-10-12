@@ -8,6 +8,10 @@ name: PR lint
 #   * Repos are squash-merge only and the squash commit title is the PR title, so the history on
 #     main is one conventional commit per PR. The push job below flags any commit that bypasses it
 #     (for example a merge call that passes its own commit_title).
+# Forward control for public repos: the strict subset (tracker ids scoped to TOG below,
+# instance UI links like /TOG/issues/, and the internal host) always fails the PR
+# title/body check. STRICT_INTERNAL_LEVEL fail-closed: any value other than an explicit
+# "warning" (or "warn") downgrade fails. Advisory remainder keeps its current level.
 
 on:
   pull_request:
@@ -24,6 +28,7 @@ concurrency:
 
 env:
   REQUIRE_CARD_REF: "false"
+  STRICT_INTERNAL_LEVEL: "error" # fail-closed strict public-text gate; "warning" downgrades it
 
 jobs:
   pr-lint:
@@ -47,6 +52,13 @@ jobs:
           HELP = ("Expected a Conventional Commits header, e.g. 'fix(auth): refuse expired sudo "
                   "sessions' or 'feat(events): shareable event page'. Allowed types: "
                   + TYPES.replace("|", ", ") + ". Put the card ID in the body as 'Refs: TOG-1234'.")
+          # Strict public-text subset: tracker ids (this file's prefix-scoped pattern),
+          # instance UI links and the internal host. These always fail a public title/body
+          # check unless the strict level is explicitly downgraded to a warning (fail-closed).
+          TRACKER_ID = re.compile(r"\bTOG-\d+\b")
+          UI_LINK = re.compile(r"/[A-Z]{2,6}/(issues|agents|projects|approvals|runs)/")
+          HOST_INTERNAL = re.compile(r"\binfextion\.net\b", re.IGNORECASE)
+          STRICT_FIXED = [(UI_LINK, "an instance UI link"), (HOST_INTERNAL, "the internal host")]
 
           def header_errors(text):
               errs = []
@@ -57,6 +69,25 @@ jobs:
               if text.rstrip().endswith("."):
                   errs.append("ends with a period")
               return errs
+
+          def strict_internal_hits(text):
+              """Fail-closed strict subset for public title/body. Labels only, never values."""
+              hits = []
+              if TRACKER_ID.search(text or ""):
+                  hits.append("a tracker id")
+              for pat, label in STRICT_FIXED:
+                  if pat.search(text or ""):
+                      hits.append(label)
+              return hits
+
+          def report_strict(hits, where):
+              raw = (os.environ.get("STRICT_INTERNAL_LEVEL") or "").strip().lower()
+              level = "warning" if raw in ("warning", "warn") else "error"
+              print(f"::{level} title=Strict internal ref in {where}::The PR {where} holds " +
+                    f"{', '.join(hits)}. Public PR text carries no tracker ids, instance " +
+                    "links or internal hosts: say it in plain words and link only public " +
+                    "GitHub issues.")
+              return level == "error"
 
           failed = False
           if os.environ["EVENT"] == "pull_request":
@@ -77,10 +108,11 @@ jobs:
                   failed = True
                   print("::error title=PR body::The description is empty. Say what changed, why, "
                         "and how it was tested (see the PR template).")
-              if not re.search(r"\bTOG-\d+\b", body):
-                  level = "error" if os.environ["REQUIRE_CARD_REF"] == "true" else "warning"
-                  failed = failed or level == "error"
-                  print(f"::{level} title=Card reference::Add 'Refs: TOG-1234' to the PR body.")
+              for where, text_in in (("the title", title), ("the body", body)):
+                  hits = strict_internal_hits(text_in)
+                  if hits:
+                      if report_strict(hits, where):
+                          failed = True
           else:
               for c in json.loads(os.environ.get("COMMITS") or "[]") or []:
                   subject = (c.get("message") or "").splitlines()[0] if c.get("message") else ""
