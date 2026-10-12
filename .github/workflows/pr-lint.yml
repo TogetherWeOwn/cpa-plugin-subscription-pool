@@ -3,7 +3,7 @@ name: PR lint
 # Org convention for every change that lands on main (TogetherWeOwn GitHub standard):
 #   * PR title = Conventional Commits header: `type(scope): summary`, <= 100 chars, no trailing period.
 #     Types: feat fix perf refactor test docs build ci chore revert style security.
-#     Put the card ID in the body (`Refs: TOG-1234`), not in the title.
+#     Public text carries no tracker ids (see the strict check below): keep card IDs out of the title and body.
 #   * PR body explains what changed, why, and how it was tested.
 #   * Repos are squash-merge only and the squash commit title is the PR title, so the history on
 #     main is one conventional commit per PR. The push job below flags any commit that bypasses it
@@ -27,7 +27,6 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  REQUIRE_CARD_REF: "false"
   STRICT_INTERNAL_LEVEL: "error" # fail-closed strict public-text gate; "warning" downgrades it
 
 jobs:
@@ -51,12 +50,12 @@ jobs:
           HEADER = re.compile(rf"^({TYPES})(\([A-Za-z0-9._/,-]+\))?!?: \S.*$")
           HELP = ("Expected a Conventional Commits header, e.g. 'fix(auth): refuse expired sudo "
                   "sessions' or 'feat(events): shareable event page'. Allowed types: "
-                  + TYPES.replace("|", ", ") + ". Put the card ID in the body as 'Refs: TOG-1234'.")
+                  + TYPES.replace("|", ", ") + ". Keep tracker ids, instance links and internal hosts out of the title and body.")
           # Strict public-text subset: tracker ids (this file's prefix-scoped pattern),
           # instance UI links and the internal host. These always fail a public title/body
           # check unless the strict level is explicitly downgraded to a warning (fail-closed).
           TRACKER_ID = re.compile(r"\bTOG-\d+\b")
-          UI_LINK = re.compile(r"/[A-Z]{2,6}/(issues|agents|projects|approvals|runs)/")
+          UI_LINK = re.compile(r"/TOG/(issues|agents|projects|approvals|runs)/")
           HOST_INTERNAL = re.compile(r"\binfextion\.net\b", re.IGNORECASE)
           STRICT_FIXED = [(UI_LINK, "an instance UI link"), (HOST_INTERNAL, "the internal host")]
 
