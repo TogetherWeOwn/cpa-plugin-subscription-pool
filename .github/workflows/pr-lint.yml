@@ -10,8 +10,9 @@ name: PR lint
 #     (for example a merge call that passes its own commit_title).
 # Forward control for public repos: the strict subset (tracker ids scoped to TOG below,
 # instance UI links like /TOG/issues/, and the internal host) always fails the PR
-# title/body check. STRICT_INTERNAL_LEVEL fail-closed: any value other than an explicit
-# "warning" (or "warn") downgrade fails. Advisory remainder keeps its current level.
+# title/body check and any commit message pushed to main. STRICT_INTERNAL_LEVEL
+# fail-closed: any value other than an explicit "warning" (or "warn") downgrade fails.
+# Advisory remainder keeps its current level.
 
 on:
   pull_request:
@@ -82,8 +83,8 @@ jobs:
           def report_strict(hits, where):
               raw = (os.environ.get("STRICT_INTERNAL_LEVEL") or "").strip().lower()
               level = "warning" if raw in ("warning", "warn") else "error"
-              print(f"::{level} title=Strict internal ref in {where}::The PR {where} holds " +
-                    f"{', '.join(hits)}. Public PR text carries no tracker ids, instance " +
+              print(f"::{level} title=Strict internal ref in {where}::{where.capitalize()} holds " +
+                    f"{', '.join(hits)}. Public text carries no tracker ids, instance " +
                     "links or internal hosts: say it in plain words and link only public " +
                     "GitHub issues.")
               return level == "error"
@@ -114,7 +115,12 @@ jobs:
                           failed = True
           else:
               for c in json.loads(os.environ.get("COMMITS") or "[]") or []:
-                  subject = (c.get("message") or "").splitlines()[0] if c.get("message") else ""
+                  message = c.get("message") or ""
+                  subject = message.splitlines()[0] if message else ""
+                  hits = strict_internal_hits(message)
+                  if hits:
+                      if report_strict(hits, f"commit {c.get('id','')[:10]} on main"):
+                          failed = True
                   if subject.startswith(("Merge ", "Revert \"")):
                       continue
                   errs = header_errors(subject)
