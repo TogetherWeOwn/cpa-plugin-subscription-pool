@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/internal/abiclient"
+	"github.com/TogetherWeOwn/cpa-plugin-subscription-pool/internal/abiclient"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 )
 

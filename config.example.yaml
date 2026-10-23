@@ -12,6 +12,28 @@ openai-compatibility:
     base-url: https://api.z.ai/api/coding/paas/v4
     api-key-entries:
       - api-key: ${ZAI_CODING_PLAN_KEY}
+  # synthetic.new: the infinite-mode provider (Big plan, free, slow, streaming
+  # only) sits at a lower priority and also serves the paid DeepSeek alias, so
+  # the synthetic module can fall back to it when the weekly credits run low.
+  - name: synthetic-infinite
+    priority: -1
+    base-url: https://api.synthetic.new/openai/v1
+    api-key-entries:
+      - api-key: ${SYNTHETIC_API_KEY}
+    models:
+      - name: "infinite:small:vision"
+        alias: synthetic-infinite/deepseek-v4.1-flash
+      - name: "infinite:small:vision"
+        alias: synthetic/deepseek-v4.1-flash
+  - name: synthetic
+    base-url: https://api.synthetic.new/openai/v1
+    api-key-entries:
+      - api-key: ${SYNTHETIC_API_KEY}
+    models:
+      - name: "hf:deepseek-ai/DeepSeek-V4.1-Flash"
+        alias: synthetic/deepseek-v4.1-flash
+      - name: "hf:moonshotai/Kimi-K3"
+        alias: synthetic/kimi-k3
 
 plugins:
   enabled: true
@@ -53,3 +75,17 @@ plugins:
               # Overrides the module-level dashboard-api-key above for this
               # account. Required whenever accounts do not share one key.
               dashboard-api-key: ${OPENCODE_GO_A_DASHBOARD_KEY}
+        synthetic:
+          # Stop new paid requests at this share of the weekly credits; aliases
+          # the infinite provider also serves move to infinite mode instead.
+          threshold-percent: 95
+          # GET /v2/quotas does not count against the plan. "0" disables
+          # polling and relies on the x-synthetic-quotas response header.
+          quota-refresh-interval: 2m
+          # Synthetic publishes no concurrency limit. Set these from your own
+          # measurements; 0 means no local cap.
+          max-concurrent: 0
+          infinite-max-concurrent: 0
+          # Defaults shown; rename only if your providers use other names.
+          paid-providers: [synthetic]
+          infinite-providers: [synthetic-infinite]

@@ -11,7 +11,7 @@ import (
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	"gopkg.in/yaml.v3"
 
-	"github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/internal/providermodule"
+	"github.com/TogetherWeOwn/cpa-plugin-subscription-pool/internal/providermodule"
 )
 
 const defaultCPAConfigPath = "config.yaml"

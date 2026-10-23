@@ -35,8 +35,8 @@ jobs:
       - name: Resolve immutable image matrix
         run: .github/scripts/resolve-host-images.sh > "$RUNNER_TEMP/host-images.json"
       - name: Build plugin
-        run: make build VERSION=0.4.5 OUT=dist/subscription-pool-v0.4.5.so
+        run: make build VERSION=0.5.0 OUT=dist/subscription-pool-v0.5.0.so
       - name: Run compatibility matrix
         env:
           HOST_MATRIX_NAMESPACE: root
-        run: sudo --preserve-env=HOST_MATRIX_NAMESPACE make test-host-matrix VERSION=0.4.5 OUT=dist/subscription-pool-v0.4.5.so HOST_IMAGES="$RUNNER_TEMP/host-images.json" HOST_MATRIX_WORK="$RUNNER_TEMP/host-matrix"
+        run: sudo --preserve-env=HOST_MATRIX_NAMESPACE make test-host-matrix VERSION=0.5.0 OUT=dist/subscription-pool-v0.5.0.so HOST_IMAGES="$RUNNER_TEMP/host-images.json" HOST_MATRIX_WORK="$RUNNER_TEMP/host-matrix"

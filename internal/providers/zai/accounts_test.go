@@ -45,6 +45,33 @@ func TestDiscoverAccountsExactPair(t *testing.T) {
 	}
 }
 
+func TestDiscoverAccountsWithoutCredentialsIsInactive(t *testing.T) {
+	accounts, err := discoverAccounts(cpaConfigProjection{AuthDir: "/auth"}, pluginConfig{DefaultPlan: "pro"})
+	if err != nil || len(accounts) != 0 {
+		t.Fatalf("discoverAccounts(no credentials, no overrides) = %v, %v; want inactive (no accounts, no error)", accounts, err)
+	}
+}
+
+func TestDiscoverAccountsOverridesWithoutCredentialsFailClosed(t *testing.T) {
+	for name, override := range map[string]accountOverride{
+		"enabled":  {KeySuffix: "abc123", Name: "zai-pro-1", Plan: "pro"},
+		"disabled": {KeySuffix: "abc123", Name: "zai-pro-1", Plan: "pro", Disabled: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := pluginConfig{DefaultPlan: "pro", Accounts: []accountOverride{override}}
+			_, err := discoverAccounts(cpaConfigProjection{AuthDir: "/auth"}, cfg)
+			if err == nil || !strings.Contains(err.Error(), "accounts[0]: key-suffix matches no account") {
+				t.Fatalf("discoverAccounts(no credentials, override) error = %v; want the same fail-closed error as with credentials present", err)
+			}
+			// The identical override with a credential present fails the same way.
+			_, err = discoverAccounts(exactPairFixture(fixtureKey), cfg)
+			if err == nil || !strings.Contains(err.Error(), "accounts[0]: key-suffix matches no account") {
+				t.Fatalf("discoverAccounts(credential, unmatched override) error = %v", err)
+			}
+		})
+	}
+}
+
 func TestDiscoverAccountsMultipleKeys(t *testing.T) {
 	fixture := exactPairFixture("key-one-111111")
 	fixture.ClaudeKeys = append(fixture.ClaudeKeys, sdkconfig.ClaudeKey{APIKey: "key-two-222222", BaseURL: zaiAnthropicBaseURL})

@@ -8,8 +8,8 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 
-	"github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/internal/coordinator"
-	"github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/internal/providermodule"
+	"github.com/TogetherWeOwn/cpa-plugin-subscription-pool/internal/coordinator"
+	"github.com/TogetherWeOwn/cpa-plugin-subscription-pool/internal/providermodule"
 )
 
 const pluginID = coordinator.PluginID
@@ -59,9 +59,17 @@ type registration struct {
 // (internal/pluginhost/host.go validPlugin) and warns on every advertised
 // method that fails to answer.
 type capabilities struct {
-	Scheduler     bool `json:"scheduler"`
-	UsagePlugin   bool `json:"usage_plugin"`
-	ManagementAPI bool `json:"management_api"`
+	Scheduler bool `json:"scheduler"`
+	// SchedulerAcrossPriorities asks hosts that support it (CLIProxyAPI v8)
+	// to offer candidates from every priority tier instead of only the
+	// highest available one. The synthetic module needs this to move a
+	// request from the paid credential (priority 0) to the lower-priority
+	// infinite-mode credential before the paid plan is exhausted. Picks no
+	// module recognizes still return Handled:false, and the host's own
+	// selector then keeps its normal priority order. Older hosts ignore it.
+	SchedulerAcrossPriorities bool `json:"scheduler_across_priorities,omitempty"`
+	UsagePlugin               bool `json:"usage_plugin"`
+	ManagementAPI             bool `json:"management_api"`
 }
 
 func pluginRegistration() registration {
@@ -71,16 +79,17 @@ func pluginRegistration() registration {
 			Name:             pluginID,
 			Version:          pluginVersion,
 			Author:           "TogetherWeOwn",
-			GitHubRepository: "https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan",
+			GitHubRepository: "https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool",
 		},
 		// Advertised per docs/ARCHITECTURE.md: quota-aware scheduler,
 		// usage accounting feed, and management status endpoints. The
 		// scheduler declines every pick until quota state exists, which
 		// keeps the host's native scheduler in control.
 		Capabilities: capabilities{
-			Scheduler:     true,
-			UsagePlugin:   true,
-			ManagementAPI: true,
+			Scheduler:                 true,
+			SchedulerAcrossPriorities: true,
+			UsagePlugin:               true,
+			ManagementAPI:             true,
 		},
 	}
 }

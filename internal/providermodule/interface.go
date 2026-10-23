@@ -105,6 +105,16 @@ type ManagementCapable interface {
 	HandleManagement(ctx context.Context, req pluginapi.ManagementRequest) pluginapi.ManagementResponse
 }
 
+// UsageRecognizer is optionally implemented by a Module that can claim a
+// usage record whose auth ID is absent from the coordinator's dispatch
+// registry, for example a credential added or re-keyed after the last
+// Reconfigure, or a host whose auth-ID derivation differs from the module's
+// own. The coordinator only consults it when no module owns record.AuthID,
+// and dispatches only when exactly one module claims the record.
+type UsageRecognizer interface {
+	RecognizeUsage(record pluginapi.UsageRecord) bool
+}
+
 // WireError is the coded error shape carried across the CGo ABI boundary.
 // Both provider modules and the coordinator produce errors satisfying Coded
 // so the ABI glue in src/ can build byte-identical error envelopes

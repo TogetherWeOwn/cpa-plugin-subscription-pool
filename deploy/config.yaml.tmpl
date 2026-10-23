@@ -1,5 +1,5 @@
 # Merge these non-secret fields into the deployed CLIProxyAPI config.
-# The operator substitutes ZAI_CODING_PLAN_KEY from the host secret channel;
+# The operator substitutes ZAI_CODING_PLAN_KEY and SYNTHETIC_API_KEY from the host secret channel;
 # the rendered file must remain mode 0600 and must never enter git or logs.
 claude-api-key:
   - api-key: ${ZAI_CODING_PLAN_KEY}
@@ -11,12 +11,29 @@ openai-compatibility:
     base-url: https://api.z.ai/api/coding/paas/v4
     api-key-entries:
       - api-key: ${ZAI_CODING_PLAN_KEY}
+  - name: synthetic-infinite
+    priority: -1
+    base-url: https://api.synthetic.new/openai/v1
+    api-key-entries:
+      - api-key: ${SYNTHETIC_API_KEY}
+    models:
+      - name: "infinite:small:vision"
+        alias: synthetic-infinite/deepseek-v4.1-flash
+      - name: "infinite:small:vision"
+        alias: synthetic/deepseek-v4.1-flash
+  - name: synthetic
+    base-url: https://api.synthetic.new/openai/v1
+    api-key-entries:
+      - api-key: ${SYNTHETIC_API_KEY}
+    models:
+      - name: "hf:deepseek-ai/DeepSeek-V4.1-Flash"
+        alias: synthetic/deepseek-v4.1-flash
 
 plugins:
   enabled: true
   dir: /app/plugins
   store-sources:
-    - https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/download/v0.4.5/registry.json
+    - https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/releases/download/v0.5.0/registry.json
   configs:
     subscription-pool:
       enabled: true
@@ -36,3 +53,8 @@ plugins:
               name: zai-pro-1
               plan: pro
               disabled: false
+        synthetic:
+          threshold-percent: 95
+          quota-refresh-interval: 2m
+          max-concurrent: 0
+          infinite-max-concurrent: 0

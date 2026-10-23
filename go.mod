@@ -1,4 +1,4 @@
-module github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan
+module github.com/TogetherWeOwn/cpa-plugin-subscription-pool
 
 go 1.26.0
 
