@@ -24,9 +24,13 @@ const (
 // auth-dir namespace. Every failure is soft: the usage page is diagnostic,
 // so persistence can never fail scheduling, usage handling or reconfigure.
 type ledgerPersistence struct {
-	mu      sync.Mutex
-	dir     string
-	loaded  bool
+	mu  sync.Mutex
+	dir string
+	// ready is set once dir's saved ledger has loaded (or there was none).
+	// Saves wait for it, so a file that fails to load (corrupt, from a
+	// newer version, unreadable) is never overwritten, and the ledger
+	// stays in the directory it loaded from until the plugin restarts.
+	ready   bool
 	saving  bool
 	savedAt time.Time
 	// lastCode is the closed-vocabulary failure the public page shows
@@ -43,16 +47,19 @@ func (p *ledgerPersistence) failLocked(code string, err error) {
 }
 
 // attachLedgerStore points persistence at pluginAuthDir/usage and loads the
-// saved ledger the first time a directory is known.
+// saved ledger. Until a load succeeds, every reconfigure retries it and
+// nothing is saved; after that, a changed auth directory applies to the
+// ledger at the next restart, so the history in the new directory is never
+// replaced. Records counted before a late successful load are merged with
+// it: they are this process's own, so nothing is counted twice.
 func (c *Coordinator) attachLedgerStore(pluginAuthDir string) {
 	p := &c.ledgerStore
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.dir = filepath.Join(pluginAuthDir, ledgerSubdir)
-	if p.loaded {
+	if p.ready {
 		return
 	}
-	p.loaded = true
+	p.dir = filepath.Join(pluginAuthDir, ledgerSubdir)
 	store, err := securestore.New(p.dir)
 	if err != nil {
 		p.failLocked("open_failed", err)
@@ -65,12 +72,14 @@ func (c *Coordinator) attachLedgerStore(pluginAuthDir string) {
 		p.failLocked("read_failed", err)
 		return
 	}
-	if !found {
-		return
+	if found {
+		if err := c.ledger.UnmarshalState(raw, c.runtimeNow()); err != nil {
+			p.failLocked("decode_failed", err)
+			return
+		}
 	}
-	if err := c.ledger.UnmarshalState(raw, c.runtimeNow()); err != nil {
-		p.failLocked("decode_failed", err)
-	}
+	p.ready = true
+	p.lastCode, p.lastErr = "", ""
 }
 
 // rawState lets securestore's JSON reader hand back the ledger's own bytes.
@@ -108,7 +117,7 @@ func (c *Coordinator) recordUsage(entry moduleEntry, record pluginapi.UsageRecor
 func (c *Coordinator) maybeSaveLedger(now time.Time, force bool) {
 	p := &c.ledgerStore
 	p.mu.Lock()
-	if p.dir == "" || p.saving || !c.ledger.Dirty() || (!force && now.Sub(p.savedAt) < ledgerSaveEvery) {
+	if !p.ready || p.saving || !c.ledger.Dirty() || (!force && now.Sub(p.savedAt) < ledgerSaveEvery) {
 		p.mu.Unlock()
 		return
 	}
@@ -168,5 +177,5 @@ func (c *Coordinator) ledgerPersistenceStatus() (persisted bool, code, detail st
 	p := &c.ledgerStore
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.dir != "" && p.lastCode == "", p.lastCode, p.lastErr
+	return p.ready && p.lastCode == "", p.lastCode, p.lastErr
 }

@@ -600,3 +600,84 @@ func TestUnrecognizedReasonsAndSourcesNeverReachThePublicPage(t *testing.T) {
 		}
 	}
 }
+
+func writeLedgerFile(t *testing.T, dir, content string) string {
+	t.Helper()
+	path := filepath.Join(dir, ledgerSubdir, ledgerStateName)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestUnreadableLedgerIsNeverOverwritten(t *testing.T) {
+	for name, tc := range map[string]struct{ content, code string }{
+		"corrupt":       {"{not json", "read_failed"},
+		"newer version": {`{"version":9,"records":5}`, "decode_failed"},
+	} {
+		content := tc.content
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := writeLedgerFile(t, dir, content)
+			c := pageCoordinator(t)
+			c.attachLedgerStore(dir)
+			_ = c.handleUsage(usageRecord(hiddenPaidLaneRef, "synthetic/glm-5.3", pageNow, 10, 0))
+			c.ledgerStore.wg.Wait()
+			c.flushLedger()
+			if raw, _ := os.ReadFile(path); string(raw) != content {
+				t.Fatalf("an unreadable saved ledger was overwritten with %d bytes", len(raw))
+			}
+			if persisted, code, _ := c.ledgerPersistenceStatus(); persisted || code != tc.code {
+				t.Fatalf("persistence = %v %q, want not persisted, %s", persisted, code, tc.code)
+			}
+			// The next reconfigure retries; once the file is gone, saving resumes
+			// and the records kept in memory meanwhile are written.
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			c.attachLedgerStore(dir)
+			c.flushLedger()
+			restored := New(&fakeModule{id: "synthetic"})
+			restored.now = func() time.Time { return pageNow }
+			restored.attachLedgerStore(dir)
+			if got := restored.ledger.Query(usage.RangeByID("1h"), pageNow); got.Records != 1 {
+				t.Fatalf("after recovery the saved ledger has %d records, want 1", got.Records)
+			}
+		})
+	}
+}
+
+func TestLedgerStaysInTheDirectoryItLoadedFrom(t *testing.T) {
+	first, second := t.TempDir(), t.TempDir()
+	// The second directory already holds another installation's history.
+	other := usage.New()
+	other.Record("zai", "zai-pro-1", pluginapi.UsageRecord{Alias: "glm-5.3", RequestedAt: pageNow.Add(-time.Minute)}, pageNow)
+	otherRaw, err := other.MarshalState(pageNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherPath := writeLedgerFile(t, second, string(otherRaw))
+
+	c := pageCoordinator(t)
+	c.attachLedgerStore(first)
+	c.ledgerStore.savedAt = pageNow // only the final flush writes
+	_ = c.handleUsage(usageRecord(hiddenPaidLaneRef, "synthetic/glm-5.3", pageNow, 10, 0))
+	// The host's auth-dir changes at runtime: the ledger keeps saving to the
+	// directory it loaded from until a restart, and never replaces the
+	// history in the new one.
+	c.attachLedgerStore(second)
+	_ = c.handleUsage(usageRecord(hiddenPaidLaneRef, "synthetic/glm-5.3", pageNow, 10, 0))
+	c.flushLedger()
+	if raw, _ := os.ReadFile(otherPath); string(raw) != string(otherRaw) {
+		t.Fatal("the ledger replaced the history in the new auth directory")
+	}
+	restored := New(&fakeModule{id: "synthetic"})
+	restored.now = func() time.Time { return pageNow }
+	restored.attachLedgerStore(first)
+	if got := restored.ledger.Query(usage.RangeByID("1h"), pageNow); got.Records != 2 {
+		t.Fatalf("the first directory holds %d records, want 2", got.Records)
+	}
+}

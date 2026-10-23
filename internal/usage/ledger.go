@@ -689,9 +689,10 @@ func sortedKeys(rows map[Key]*Counters) []Key {
 	return keys
 }
 
-// UnmarshalState merges a previously saved ledger into l (counters add up,
-// so loading twice double-counts: load once, before any Record). Buckets
-// outside the retention windows are dropped.
+// UnmarshalState merges a previously saved ledger into l. Counters add up,
+// so load a saved state once, and only into a ledger whose records are not
+// already in it (an empty one, or this process's own records). Buckets
+// outside the retention windows are dropped. On error l is unchanged.
 func (l *Ledger) UnmarshalState(raw []byte, now time.Time) error {
 	var state persisted
 	if err := json.Unmarshal(raw, &state); err != nil {
