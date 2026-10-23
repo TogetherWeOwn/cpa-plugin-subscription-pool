@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
@@ -30,8 +31,11 @@ const (
 	CoarseStep      = time.Hour
 	CoarseRetention = 8 * 24 * time.Hour
 
-	maxRowsPerBucket = 200
+	maxRowsPerBucket = 100
 	maxLabel         = 120
+	// maxStateBytes bounds the persisted ledger well under securestore's
+	// 8 MiB file limit; MarshalState drops the oldest buckets to fit.
+	maxStateBytes = 6 << 20
 	// OverflowLabel names the row that absorbs keys past maxRowsPerBucket.
 	OverflowLabel = "(other)"
 
@@ -40,7 +44,7 @@ const (
 	minGeneration       = 100 * time.Millisecond
 	minGenerationTokens = 20
 
-	stateVersion = 1
+	stateVersion = 2
 )
 
 // Key identifies one ledger row.
@@ -188,6 +192,9 @@ type Ledger struct {
 	since   time.Time
 	records int64
 	dirty   bool
+	// generation counts changes, so a save can clear dirty only when no
+	// record arrived between its marshal and its successful write.
+	generation uint64
 }
 
 // New returns an empty ledger.
@@ -225,6 +232,7 @@ func (l *Ledger) Record(provider, account string, record pluginapi.UsageRecord, 
 	}
 	l.records++
 	l.dirty = true
+	l.generation++
 	l.fine.prune(now)
 	l.coarse.prune(now)
 }
@@ -235,7 +243,20 @@ func clean(value, fallback string) string {
 		return fallback
 	}
 	if len(value) > maxLabel {
-		value = value[:maxLabel]
+		// Cut on a rune boundary: a split multibyte rune would be invalid
+		// UTF-8 in memory but U+FFFD after a JSON round trip, splitting one
+		// label into two rows across a restart.
+		cut := 0
+		for index, r := range value {
+			if index+utf8.RuneLen(r) > maxLabel {
+				break
+			}
+			cut = index + utf8.RuneLen(r)
+		}
+		value = value[:cut]
+	}
+	if !utf8.ValidString(value) {
+		value = strings.ToValidUTF8(value, "\uFFFD")
 	}
 	return value
 }
@@ -386,69 +407,152 @@ func (l *Ledger) Query(rng Range, now time.Time) Report {
 	return report
 }
 
-// persisted is the on-disk shape. Rows are stored as arrays to keep the
-// file small: [provider, account, model, counters].
+// persisted is the on-disk shape (version 2). Labels are stored once in
+// Keys; each row is [key index, counters...] in counterOrder with trailing
+// zeros trimmed, which keeps a full ledger to a few MiB.
 type persisted struct {
 	Version int             `json:"version"`
 	Since   *time.Time      `json:"since,omitempty"`
 	Records int64           `json:"records"`
+	Keys    [][3]string     `json:"keys"`
 	Fine    []persistBucket `json:"fine"`
 	Coarse  []persistBucket `json:"coarse"`
 }
 
 type persistBucket struct {
-	Start int64        `json:"t"`
-	Rows  []persistRow `json:"rows"`
+	Start int64     `json:"t"`
+	Rows  [][]int64 `json:"r"`
 }
 
-type persistRow struct {
-	Key
-	Counters
+func (c Counters) values() []int64 {
+	out := []int64{c.Requests, c.Failures, c.Status429, c.Status4xx, c.Status5xx, c.InputTokens, c.OutputTokens,
+		c.ReasoningTokens, c.CachedTokens, c.TotalTokens, c.LatencyMillis, c.LatencyCount, c.TTFTMillis, c.TTFTCount,
+		c.GenTokens, c.GenMillis}
+	for len(out) > 0 && out[len(out)-1] == 0 {
+		out = out[:len(out)-1]
+	}
+	return out
 }
 
-// Dirty reports whether the ledger changed since the last MarshalState.
+func countersFrom(values []int64) Counters {
+	get := func(i int) int64 {
+		if i < len(values) && values[i] > 0 {
+			return values[i]
+		}
+		return 0
+	}
+	return Counters{Requests: get(0), Failures: get(1), Status429: get(2), Status4xx: get(3), Status5xx: get(4),
+		InputTokens: get(5), OutputTokens: get(6), ReasoningTokens: get(7), CachedTokens: get(8), TotalTokens: get(9),
+		LatencyMillis: get(10), LatencyCount: get(11), TTFTMillis: get(12), TTFTCount: get(13), GenTokens: get(14), GenMillis: get(15)}
+}
+
+// Dirty reports whether the ledger changed since the last MarkSaved.
 func (l *Ledger) Dirty() bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.dirty
 }
 
-// MarshalState serializes the ledger and clears the dirty flag.
+// MarshalState serializes the ledger without changing its dirty state.
 func (l *Ledger) MarshalState(now time.Time) ([]byte, error) {
+	raw, _, err := l.MarshalStateGeneration(now)
+	return raw, err
+}
+
+// MarshalStateGeneration serializes the ledger and returns the generation it
+// captured; pass it to MarkSaved once the bytes are durably written. The
+// state is kept under maxStateBytes: every coarse bucket is kept first
+// (newest first), then fine buckets newest first, so dropping only ever
+// loses the oldest detail, never recent totals.
+func (l *Ledger) MarshalStateGeneration(now time.Time) ([]byte, uint64, error) {
 	l.mu.Lock()
 	l.fine.prune(now)
 	l.coarse.prune(now)
-	state := persisted{Version: stateVersion, Records: l.records, Fine: exportTier(l.fine), Coarse: exportTier(l.coarse)}
+	state := persisted{Version: stateVersion, Records: l.records, Keys: [][3]string{}, Fine: []persistBucket{}, Coarse: []persistBucket{}}
 	if !l.since.IsZero() {
 		since := l.since
 		state.Since = &since
 	}
-	l.dirty = false
+	index := make(map[Key]int64)
+	budget := maxStateBytes - 512
+	keep := func(t tier) []persistBucket {
+		var out []persistBucket
+		for _, start := range sortedStarts(t, true) {
+			rows := t.buckets[start]
+			bucket := persistBucket{Start: start, Rows: make([][]int64, 0, len(rows))}
+			cost := 24
+			var added [][3]string
+			for _, key := range sortedKeys(rows) {
+				id, ok := index[key]
+				if !ok {
+					id = int64(len(state.Keys) + len(added))
+					added = append(added, [3]string{key.Provider, key.Account, key.Model})
+					cost += len(key.Provider) + len(key.Account) + len(key.Model) + 12
+				}
+				row := append([]int64{id}, rows[key].values()...)
+				bucket.Rows = append(bucket.Rows, row)
+				cost += 2 + len(row)*12
+			}
+			if cost > budget {
+				break
+			}
+			budget -= cost
+			for _, key := range added {
+				index[Key{Provider: key[0], Account: key[1], Model: key[2]}] = int64(len(state.Keys))
+				state.Keys = append(state.Keys, key)
+			}
+			out = append(out, bucket)
+		}
+		return out
+	}
+	state.Coarse = keep(l.coarse)
+	state.Fine = keep(l.fine)
+	generation := l.generation
 	l.mu.Unlock()
-	return json.Marshal(state)
+	raw, err := json.Marshal(state)
+	return raw, generation, err
 }
 
-func exportTier(t tier) []persistBucket {
-	out := make([]persistBucket, 0, len(t.buckets))
-	for start, rows := range t.buckets {
-		bucket := persistBucket{Start: start, Rows: make([]persistRow, 0, len(rows))}
-		for key, row := range rows {
-			bucket.Rows = append(bucket.Rows, persistRow{Key: key, Counters: *row})
-		}
-		sort.Slice(bucket.Rows, func(i, j int) bool {
-			a, b := bucket.Rows[i].Key, bucket.Rows[j].Key
-			if a.Provider != b.Provider {
-				return a.Provider < b.Provider
-			}
-			if a.Account != b.Account {
-				return a.Account < b.Account
-			}
-			return a.Model < b.Model
-		})
-		out = append(out, bucket)
+// MarkSaved clears the dirty flag if nothing changed since the marshal that
+// returned generation.
+func (l *Ledger) MarkSaved(generation uint64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.generation == generation {
+		l.dirty = false
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Start < out[j].Start })
-	return out
+}
+
+func sortedStarts(t tier, newestFirst bool) []int64 {
+	starts := make([]int64, 0, len(t.buckets))
+	for start := range t.buckets {
+		starts = append(starts, start)
+	}
+	sort.Slice(starts, func(i, j int) bool {
+		if newestFirst {
+			return starts[i] > starts[j]
+		}
+		return starts[i] < starts[j]
+	})
+	return starts
+}
+
+func sortedKeys(rows map[Key]*Counters) []Key {
+	keys := make([]Key, 0, len(rows))
+	for key := range rows {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		a, b := keys[i], keys[j]
+		if a.Provider != b.Provider {
+			return a.Provider < b.Provider
+		}
+		if a.Account != b.Account {
+			return a.Account < b.Account
+		}
+		return a.Model < b.Model
+	})
+	return keys
 }
 
 // UnmarshalState merges a previously saved ledger into l (counters add up,
@@ -462,25 +566,32 @@ func (l *Ledger) UnmarshalState(raw []byte, now time.Time) error {
 	if state.Version != stateVersion {
 		return fmt.Errorf("usage ledger state: unsupported version %d", state.Version)
 	}
+	keys := make([]Key, len(state.Keys))
+	for i, key := range state.Keys {
+		keys[i] = Key{Provider: clean(key[0], "unknown"), Account: clean(key[1], "unattributed"), Model: clean(key[2], "unknown")}
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	importTier(&l.fine, state.Fine)
-	importTier(&l.coarse, state.Coarse)
+	for _, pair := range []struct {
+		t       *tier
+		buckets []persistBucket
+	}{{&l.fine, state.Fine}, {&l.coarse, state.Coarse}} {
+		for _, bucket := range pair.buckets {
+			at := time.Unix(bucket.Start, 0).UTC()
+			for _, row := range bucket.Rows {
+				if len(row) == 0 || row[0] < 0 || row[0] >= int64(len(keys)) {
+					continue
+				}
+				pair.t.add(at, keys[row[0]], countersFrom(row[1:]))
+			}
+		}
+	}
 	l.fine.prune(now)
 	l.coarse.prune(now)
 	if state.Since != nil && (l.since.IsZero() || state.Since.Before(l.since)) {
 		l.since = state.Since.UTC()
 	}
 	l.records += state.Records
+	l.generation++
 	return nil
-}
-
-func importTier(t *tier, buckets []persistBucket) {
-	for _, bucket := range buckets {
-		at := time.Unix(bucket.Start, 0).UTC()
-		for _, row := range bucket.Rows {
-			key := Key{Provider: clean(row.Provider, "unknown"), Account: clean(row.Account, "unattributed"), Model: clean(row.Model, "unknown")}
-			t.add(at, key, row.Counters)
-		}
-	}
 }

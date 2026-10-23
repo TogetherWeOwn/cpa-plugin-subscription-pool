@@ -51,19 +51,6 @@ type opencodeResourceStatus struct {
 	Accounts []opencodeResourceAccount `json:"accounts"`
 }
 
-func opencodeSourceLabel(w opencodeResourceWindow) string {
-	switch {
-	case w.Authoritative:
-		return "authoritative"
-	case strings.HasPrefix(w.Source, "proxy-observed"):
-		return "429-derived"
-	case w.Source == "":
-		return "unknown"
-	default:
-		return w.Source
-	}
-}
-
 func clampPercent(percent float64) float64 {
 	if percent < 0 {
 		return 0

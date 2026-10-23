@@ -186,7 +186,7 @@ The plugin adds a **Usage and Quota** entry to the Management Center's plugin me
 - synthetic.new: the weekly credit with its 2%-per-202-minutes refill schedule and the time it is full again, infinite-mode requests and speed against paid, and in-flight, peak and cap per lane;
 - Quota Management cards with remaining-percent bars, reset times and countdowns, and a two-week quota-window timeline.
 
-The page follows the Management Center theme when it is served from the same origin. Its palette, type stacks and layout reproduce the [CLIProxyAPI Management Center](https://github.com/router-for-me/Cli-Proxy-API-Management-Center) design (MIT, Router-For.ME); no source code from that project is included. Usage history comes from the plugin's own ledger of the requests it schedules: 5-minute buckets for 48 hours and 1-hour buckets for 8 days, saved under the plugin's auth directory. The page and its `usage.json` data route are unauthenticated resource routes, like every CLIProxyAPI plugin page, so they carry only redacted fields: no key, key fragment, auth ID, client key or request content.
+The page follows the Management Center theme when it is served from the same origin. Its palette, type stacks and layout reproduce the [CLIProxyAPI Management Center](https://github.com/router-for-me/Cli-Proxy-API-Management-Center) design (MIT, Router-For.ME); no source code from that project is included. Usage history comes from the plugin's own ledger of the requests it schedules: 5-minute buckets for 48 hours and 1-hour buckets for 8 days, saved under the plugin's auth directory. The page and its `usage.json` data route are unauthenticated resource routes, like every CLIProxyAPI plugin page, so they carry only redacted fields: no key, key fragment, auth ID, client key, request content or upstream error text (reasons are closed codes; the free text stays on the authenticated status route).
 
 ## Management API
 
@@ -201,7 +201,7 @@ curl --fail-with-body \
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/v0/management/plugins/subscription-pool/usage` | Usage page data: requests, tokens and errors per provider, account and model for `?range=1h|6h|24h|7d`, quota cards, and the synthetic.new panel. |
+| `GET` | `/v0/management/plugins/subscription-pool/usage` | Usage page data: requests, tokens and errors per provider, account and model for `?range=` (`1h`, `6h`, `24h` or `7d`), quota cards, and the synthetic.new panel. |
 | `GET` | `/v0/management/plugins/zai-coding-plan/status` | Redacted per-account quota, reset times, source, freshness, off-peak state, health, and integrity warnings. |
 | `POST` | `/v0/management/plugins/zai-coding-plan/refresh` | Force a bounded quota refresh for configured accounts. Body must be empty or `{}`. |
 | `POST` | `/v0/management/plugins/zai-coding-plan/unblock` | Clear transient blocks without erasing retained quota or usage. Optional JSON: `{"account":"name-or-suffix"}`. |

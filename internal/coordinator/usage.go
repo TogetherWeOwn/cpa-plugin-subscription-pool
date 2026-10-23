@@ -128,8 +128,11 @@ func (c *Coordinator) maybeSaveLedger(now time.Time, force bool) {
 	go save()
 }
 
+// saveLedger writes the ledger and clears its dirty flag only after the
+// write succeeded, so a failed save is retried by the next save or the
+// shutdown flush.
 func (c *Coordinator) saveLedger(dir string, now time.Time) error {
-	raw, err := c.ledger.MarshalState(now)
+	raw, generation, err := c.ledger.MarshalStateGeneration(now)
 	if err != nil {
 		return err
 	}
@@ -138,7 +141,11 @@ func (c *Coordinator) saveLedger(dir string, now time.Time) error {
 		return err
 	}
 	defer func() { _ = store.Close() }()
-	return store.WriteJSON(ledgerStateName, rawState(raw))
+	if err := store.WriteJSON(ledgerStateName, rawState(raw)); err != nil {
+		return err
+	}
+	c.ledger.MarkSaved(generation)
+	return nil
 }
 
 // flushLedger waits for any background save and then saves synchronously.

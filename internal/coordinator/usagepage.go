@@ -46,22 +46,24 @@ func providerLabel(id string) string {
 	return id
 }
 
-// usagePageData is the redacted payload of the usage page. It carries
-// provider IDs, account display names, model names, quota percentages,
-// reset times and counters only: never a key, key fragment, fingerprint,
-// auth ID or request content.
+// usagePageData is the redacted payload of the usage page. It is served on
+// an unauthenticated resource route, so it carries provider IDs, account
+// display names, model names, quota percentages, reset times, counters and
+// closed-vocabulary codes only: never a key, key fragment, fingerprint, auth
+// ID, request content, or free text (upstream error bodies, health reasons,
+// validation errors). Free text stays on the authenticated status route.
 type usagePageData struct {
-	Plugin          string          `json:"plugin"`
-	Version         string          `json:"version"`
-	Status          string          `json:"status"`
-	ValidationError string          `json:"validation_error,omitempty"`
-	GeneratedAt     time.Time       `json:"generated_at"`
-	Ranges          []string        `json:"ranges"`
-	Providers       []usageProvider `json:"providers"`
-	Quota           []quotaCard     `json:"quota"`
-	Usage           usage.Report    `json:"usage"`
-	Synthetic       *syntheticPanel `json:"synthetic,omitempty"`
-	Ledger          ledgerInfo      `json:"ledger"`
+	Plugin           string          `json:"plugin"`
+	Version          string          `json:"version"`
+	Status           string          `json:"status"`
+	ValidationFailed bool            `json:"validation_failed,omitempty"`
+	GeneratedAt      time.Time       `json:"generated_at"`
+	Ranges           []string        `json:"ranges"`
+	Providers        []usageProvider `json:"providers"`
+	Quota            []quotaCard     `json:"quota"`
+	Usage            usage.Report    `json:"usage"`
+	Synthetic        *syntheticPanel `json:"synthetic,omitempty"`
+	Ledger           ledgerInfo      `json:"ledger"`
 }
 
 type usageProvider struct {
@@ -78,7 +80,7 @@ type quotaCard struct {
 	Kind          string        `json:"kind,omitempty"`
 	Plan          string        `json:"plan,omitempty"`
 	Health        string        `json:"health"`
-	HealthReason  string        `json:"health_reason,omitempty"`
+	Reason        string        `json:"reason,omitempty"`
 	Windows       []quotaWindow `json:"windows"`
 	Metrics       []quotaMetric `json:"metrics,omitempty"`
 }
@@ -120,7 +122,6 @@ type syntheticPanel struct {
 	RegenIntervalMinutes int                `json:"regen_interval_minutes"`
 	Lanes                []syntheticLane    `json:"lanes"`
 	Routing              syntheticRouting   `json:"routing"`
-	Notes                []string           `json:"notes,omitempty"`
 	Schedule             []syntheticRegenAt `json:"regen_schedule,omitempty"`
 }
 
@@ -128,7 +129,7 @@ type syntheticLane struct {
 	Name           string     `json:"name"`
 	Kind           string     `json:"kind"`
 	Health         string     `json:"health"`
-	HealthReason   string     `json:"health_reason,omitempty"`
+	Reason         string     `json:"reason,omitempty"`
 	Learned        bool       `json:"learned,omitempty"`
 	InFlight       int        `json:"in_flight"`
 	PeakInFlight   int        `json:"peak_in_flight"`
@@ -144,6 +145,19 @@ type syntheticLane struct {
 	LastStatus     int        `json:"last_status,omitempty"`
 }
 
+// syntheticRoutingStatus is the module's routing block as the authenticated
+// status reports it (with the free-text fallback reason).
+type syntheticRoutingStatus struct {
+	PaidPicks          int64      `json:"paid_picks"`
+	InfinitePicks      int64      `json:"infinite_picks"`
+	Fallbacks          int64      `json:"fallbacks_to_infinite"`
+	Rejections         int64      `json:"rejections"`
+	InfiniteNonStream  int64      `json:"infinite_non_stream_picks"`
+	LastFallbackReason string     `json:"last_fallback_reason"`
+	LastFallbackAt     *time.Time `json:"last_fallback_at"`
+}
+
+// syntheticRouting is the page's copy: the fallback reason becomes a code.
 type syntheticRouting struct {
 	PaidPicks          int64      `json:"paid_picks"`
 	InfinitePicks      int64      `json:"infinite_picks"`
@@ -152,6 +166,53 @@ type syntheticRouting struct {
 	InfiniteNonStream  int64      `json:"infinite_non_stream_picks"`
 	LastFallbackReason string     `json:"last_fallback_reason,omitempty"`
 	LastFallbackAt     *time.Time `json:"last_fallback_at,omitempty"`
+}
+
+// reasonCode maps a module's free-text health or fallback reason (which can
+// embed an upstream error body) to a closed vocabulary for the page.
+func reasonCode(text string) string {
+	text = strings.TrimSpace(text)
+	switch {
+	case text == "":
+		return ""
+	case strings.HasPrefix(text, "exhausted"):
+		return "quota_exhausted"
+	case strings.HasPrefix(text, "weekly credits"):
+		return "at_threshold"
+	case strings.Contains(text, "concurrency cap"):
+		return "concurrency_cap"
+	case strings.HasPrefix(text, "busy until"):
+		return "resting"
+	case strings.HasPrefix(text, "credential not bound"):
+		return "unbound_credential"
+	case strings.HasPrefix(text, "no API key yet"):
+		return "placeholder_key"
+	default:
+		return "other"
+	}
+}
+
+// sourceCode maps a quota window's source text to a closed vocabulary.
+func sourceCode(raw string, authoritative bool) string {
+	raw = strings.TrimSpace(raw)
+	switch {
+	case authoritative, raw == "quota_api", raw == "authoritative":
+		return "authoritative"
+	case raw == "estimate":
+		return "estimate"
+	case strings.HasPrefix(raw, "quota poll"):
+		return "quota_poll"
+	case strings.HasPrefix(raw, "response header"):
+		return "response_header"
+	case strings.Contains(raw, "proxy-observed"), raw == "429-derived":
+		return "429_derived"
+	case strings.Contains(raw, "free"):
+		return "free"
+	case raw == "", raw == "unknown":
+		return "unknown"
+	default:
+		return "observed"
+	}
 }
 
 // syntheticRegenAt is one projected regeneration tick of the paid weekly
@@ -177,14 +238,14 @@ func (c *Coordinator) buildUsagePageData(rangeID string) usagePageData {
 	now := status.GeneratedAt
 	rng := usage.RangeByID(rangeID)
 	data := usagePageData{
-		Plugin:          PluginID,
-		Version:         status.Version,
-		Status:          status.Status,
-		ValidationError: status.ValidationError,
-		GeneratedAt:     now,
-		Providers:       []usageProvider{},
-		Quota:           []quotaCard{},
-		Usage:           c.ledger.Query(rng, now),
+		Plugin:           PluginID,
+		Version:          status.Version,
+		Status:           status.Status,
+		ValidationFailed: status.ValidationError != "",
+		GeneratedAt:      now,
+		Providers:        []usageProvider{},
+		Quota:            []quotaCard{},
+		Usage:            c.ledger.Query(rng, now),
 	}
 	for _, item := range usage.Ranges {
 		data.Ranges = append(data.Ranges, item.ID)
@@ -271,8 +332,8 @@ func zaiQuotaCards(raw json.RawMessage) []quotaCard {
 		if health == "" {
 			health = "unknown"
 		}
-		source := a.QuotaSource
-		authoritative := source == "quota_api"
+		authoritative := a.QuotaSource == "quota_api"
+		source := sourceCode(a.QuotaSource, authoritative)
 		cards = append(cards, quotaCard{
 			Provider: "zai", ProviderLabel: providerLabel("zai"), Account: a.Name, Plan: a.Plan, Health: health,
 			Windows: []quotaWindow{
@@ -317,7 +378,7 @@ func opencodeQuotaCards(raw json.RawMessage) []quotaCard {
 			if w.Exhausted && !a.Disabled {
 				card.Health = "exhausted"
 			}
-			card.Windows = append(card.Windows, resetWindow(spec.id, spec.label, spec.duration, utilization, w.ResetAt, opencodeSourceLabel(w), w.Authoritative, false, w.Exhausted))
+			card.Windows = append(card.Windows, resetWindow(spec.id, spec.label, spec.duration, utilization, w.ResetAt, sourceCode(w.Source, w.Authoritative), w.Authoritative, false, w.Exhausted))
 		}
 		cards = append(cards, card)
 	}
@@ -351,8 +412,7 @@ type syntheticStatusView struct {
 			LastStatus      int      `json:"last_status"`
 		} `json:"stats"`
 	} `json:"accounts"`
-	Routing         syntheticRouting `json:"routing"`
-	ObservationGaps []string         `json:"observation_gaps"`
+	Routing syntheticRoutingStatus `json:"routing"`
 }
 
 // syntheticQuotaCards turns the synthetic module's status into quota cards
@@ -366,12 +426,17 @@ func syntheticQuotaCards(raw json.RawMessage, now time.Time) ([]quotaCard, *synt
 	panel := &syntheticPanel{
 		Status: status.Status, ThresholdPercent: status.ThresholdPercent,
 		RegenIntervalMinutes: int(syntheticRegenInterval / time.Minute),
-		Lanes:                []syntheticLane{}, Routing: status.Routing, Notes: status.ObservationGaps,
+		Lanes:                []syntheticLane{},
+		Routing: syntheticRouting{
+			PaidPicks: status.Routing.PaidPicks, InfinitePicks: status.Routing.InfinitePicks, Fallbacks: status.Routing.Fallbacks,
+			Rejections: status.Routing.Rejections, InfiniteNonStream: status.Routing.InfiniteNonStream,
+			LastFallbackReason: reasonCode(status.Routing.LastFallbackReason), LastFallbackAt: status.Routing.LastFallbackAt,
+		},
 	}
 	cards := make([]quotaCard, 0, len(status.Accounts))
 	for _, a := range status.Accounts {
 		lane := syntheticLane{
-			Name: a.Name, Kind: a.Kind, Health: a.Health, HealthReason: a.HealthReason, Learned: a.Learned,
+			Name: a.Name, Kind: a.Kind, Health: a.Health, Reason: reasonCode(a.HealthReason), Learned: a.Learned,
 			InFlight: a.InFlight, PeakInFlight: a.PeakInFlight, PeakInFlightAt: a.PeakInFlightAt, MaxConcurrent: a.MaxConcurrent,
 			Requests: a.Stats.Requests, Failures: a.Stats.Failures, OutputTokens: a.Stats.OutputTokens,
 			TPSSamples: a.Stats.TPSSamples, MedianTPS: a.Stats.MedianOutputTPS, MeanTPS: a.Stats.MeanOutputTPS,
@@ -379,10 +444,10 @@ func syntheticQuotaCards(raw json.RawMessage, now time.Time) ([]quotaCard, *synt
 		}
 		panel.Lanes = append(panel.Lanes, lane)
 
-		card := quotaCard{Provider: "synthetic", ProviderLabel: providerLabel("synthetic"), Account: a.Name, Kind: a.Kind, Health: a.Health, HealthReason: a.HealthReason}
+		card := quotaCard{Provider: "synthetic", ProviderLabel: providerLabel("synthetic"), Account: a.Name, Kind: a.Kind, Health: a.Health, Reason: reasonCode(a.HealthReason)}
 		if a.Kind == "infinite" {
 			card.Plan = "Infinite mode (free)"
-			card.Windows = []quotaWindow{{ID: "infinite", Label: "Infinite mode", Mode: "free", Known: true, UsedPercent: percentPtr(0), RemainingPercent: percentPtr(100), Source: "free, not metered"}}
+			card.Windows = []quotaWindow{{ID: "infinite", Label: "Infinite mode", Mode: "free", Known: true, UsedPercent: percentPtr(0), RemainingPercent: percentPtr(100), Source: "free"}}
 		} else {
 			card.Plan = "Weekly credit"
 			card.Windows = []quotaWindow{syntheticWeeklyWindow(a.Windows["weekly"], a.NextRegenPercent, status.ThresholdPercent, now)}
@@ -422,7 +487,7 @@ func syntheticWeeklyWindow(w opencodeResourceWindow, regenPercent *float64, thre
 	window.UsedPercent = percentPtr(used)
 	window.RemainingPercent = percentPtr(100 - used)
 	window.RegenPercent = &regen
-	window.Source = opencodeSourceLabel(w)
+	window.Source = sourceCode(w.Source, w.Authoritative)
 	window.Authoritative = w.Authoritative
 	window.Exhausted = w.Exhausted
 	if w.ResetAt != nil && !w.ResetAt.IsZero() {

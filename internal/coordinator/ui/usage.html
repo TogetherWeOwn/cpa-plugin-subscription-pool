@@ -356,6 +356,20 @@ ul.notes{margin:0;padding-left:18px;font-size:12px;color:var(--text-tertiary)}
   var DASH = '—';
   var PROVIDER_GLYPH = { zai: 'Z', 'opencode-go': 'G', synthetic: 'S' };
   var RANGE_LABEL = { '1h': '1 h', '6h': '6 h', '24h': '24 h', '7d': '7 d' };
+  /* The data route is unauthenticated, so reasons and sources arrive as
+     closed codes; the authenticated status route has the free text. */
+  var REASONS = {
+    quota_exhausted: 'Weekly credit exhausted (429/402); waiting for the next refill',
+    at_threshold: 'At the paid threshold; new requests go to infinite mode',
+    concurrency_cap: 'At its concurrency cap',
+    resting: 'Resting after a rate-limit 429',
+    unbound_credential: 'Credential not bound to a known account; refused until the next reconfigure',
+    placeholder_key: 'No API key yet (placeholder)',
+    other: 'Unavailable; see the authenticated status route'
+  };
+  var SOURCES = { authoritative: 'authoritative', quota_poll: 'quota poll', response_header: 'response header', '429_derived': '429-derived', estimate: 'estimate', free: 'free, not metered', observed: 'observed', unknown: 'unknown' };
+  function reasonText(code) { return code ? (REASONS[code] || REASONS.other) : ''; }
+  function sourceText(code) { return SOURCES[code] || 'unknown'; }
   var state = {
     data: null, range: '24h', provider: 'all', search: '', model: '', metric: 'requests',
     qsearch: '', qsort: 'default', qpage: 1, tlShift: 0, tlMode: 'weekly',
@@ -534,7 +548,7 @@ ul.notes{margin:0;padding-left:18px;font-size:12px;color:var(--text-tertiary)}
     $('hero-bad').textContent = num(tot.failures);
     drawWave($('hero-wave'), sums.requests);
     var banner = clear($('banner'));
-    if (d.validation_error) banner.appendChild(el('div', 'banner', 'Reconfigure rejected: ' + d.validation_error));
+    if (d.validation_failed) banner.appendChild(el('div', 'banner', 'The plugin rejected its last reconfigure. The reason is on the authenticated status route (/v0/management/plugins/subscription-pool/status).'));
   }
   var countTimer = null;
   function countUp(node, target) {
@@ -577,7 +591,7 @@ ul.notes{margin:0;padding-left:18px;font-size:12px;color:var(--text-tertiary)}
   }
 
   function tabCounts() {
-    var d = state.data, counts = { all: d.quota.length };
+    var d = state.data, counts = Object.create(null); counts.all = d.quota.length;
     d.providers.forEach(function (p) { counts[p.id] = p.accounts; });
     return counts;
   }
@@ -610,7 +624,7 @@ ul.notes{margin:0;padding-left:18px;font-size:12px;color:var(--text-tertiary)}
     });
   }
   function renderModelFilter(d) {
-    var sel = $('model-filter'), seen = {}, models = [];
+    var sel = $('model-filter'), seen = Object.create(null), models = [];
     d.usage.totals.forEach(function (t) { if (!seen[t.model] && (state.provider === 'all' || t.provider === state.provider)) { seen[t.model] = 1; models.push(t.model); } });
     models.sort();
     if (state.model && !seen[state.model]) models.unshift(state.model);
@@ -757,8 +771,8 @@ ul.notes{margin:0;padding-left:18px;font-size:12px;color:var(--text-tertiary)}
     t.appendChild(tb); host.appendChild(t);
   }
   function aggregate(totals, keyFn) {
-    var map = {}, list = [];
-    totals.forEach(function (t) { var k = keyFn(t); if (!map[k]) { map[k] = { items: [], provider: t.provider, account: t.account, model: t.model, providers: {} }; list.push(map[k]); } map[k].items.push(t); map[k].providers[t.provider] = 1; });
+    var map = Object.create(null), list = [];
+    totals.forEach(function (t) { var k = keyFn(t); if (!map[k]) { map[k] = { items: [], provider: t.provider, account: t.account, model: t.model, providers: Object.create(null) }; list.push(map[k]); } map[k].items.push(t); map[k].providers[t.provider] = 1; });
     var all = sumCounters(totals).requests || 1;
     return list.map(function (g) {
       var c = sumCounters(g.items);
@@ -822,7 +836,7 @@ ul.notes{margin:0;padding-left:18px;font-size:12px;color:var(--text-tertiary)}
         ['Next refill', w.resets_at ? '+' + w.regen_percent + '% at ' + absTime(w.resets_at) + ' (' + relTime(w.resets_at, now) + ')' : DASH],
         ['Full at', w.full_at ? absTime(w.full_at) + ' (' + relTime(w.full_at, now) + ')' : DASH],
         ['Paid stops at', s.threshold_percent + '% used'],
-        ['Source', w.source + (w.authoritative ? '' : '')]
+        ['Source', sourceText(w.source)]
       ]));
       if (s.regen_schedule && s.regen_schedule.length) {
         var t = el('table', 'tbl'), hr = el('tr'); ['Refill', 'Adds', 'Remaining'].forEach(function (h, k) { hr.appendChild(el('th', k ? 'num' : '', h)); });
@@ -860,7 +874,7 @@ ul.notes{margin:0;padding-left:18px;font-size:12px;color:var(--text-tertiary)}
       var cap = l.max_concurrent || 0, peak = Math.max(l.peak_in_flight || 0, l.in_flight || 0, 1);
       top.appendChild(el('span', 'mono', 'in flight ' + (l.in_flight || 0) + ' / ' + (cap ? 'cap ' + cap : 'no cap'))); r.appendChild(top);
       r.appendChild(meter((l.in_flight || 0) / Math.max(cap || peak, 1) * 100, cap && l.in_flight >= cap ? 'critical' : 'good'));
-      r.appendChild(el('div', 'qsub', 'peak ' + (l.peak_in_flight || 0) + (l.peak_in_flight_at ? ' at ' + absTime(l.peak_in_flight_at) : '') + ' · ' + l.health + (l.health_reason ? ': ' + l.health_reason : '')));
+      r.appendChild(el('div', 'qsub', 'peak ' + (l.peak_in_flight || 0) + (l.peak_in_flight_at ? ' at ' + absTime(l.peak_in_flight_at) : '') + ' · ' + l.health + (l.reason ? ': ' + reasonText(l.reason) : '')));
       c3.appendChild(r);
     });
     c3.appendChild(kv([
@@ -870,8 +884,10 @@ ul.notes{margin:0;padding-left:18px;font-size:12px;color:var(--text-tertiary)}
       ['Rejections (429)', num(s.routing.rejections)],
       ['Last fallback', s.routing.last_fallback_at ? absTime(s.routing.last_fallback_at) : DASH]
     ]));
-    if (s.routing.last_fallback_reason) c3.appendChild(el('p', 'note', 'Last fallback: ' + s.routing.last_fallback_reason));
-    if (s.notes && s.notes.length) { var ul = el('ul', 'notes'); s.notes.forEach(function (n) { ul.appendChild(el('li', '', n)); }); c3.appendChild(ul); }
+    if (s.routing.last_fallback_reason) c3.appendChild(el('p', 'note', 'Last fallback: ' + reasonText(s.routing.last_fallback_reason)));
+    var ul = el('ul', 'notes');
+    ['synthetic.new publishes no concurrency limit; the caps are operator settings (0 = none).', 'The reset time of the weekly credit is its next refill tick (every ' + s.regen_interval_minutes + ' minutes), not a full weekly reset.'].forEach(function (n) { ul.appendChild(el('li', '', n)); });
+    c3.appendChild(ul);
     grid.appendChild(c3);
   }
 
@@ -899,7 +915,7 @@ ul.notes{margin:0;padding-left:18px;font-size:12px;color:var(--text-tertiary)}
       var c = el('article', 'qcard'); c.style.animationDelay = Math.min(idx * 40, 360) + 'ms';
       var h = el('div', 'qhead'); var ic = el('span', 'qicon'); ic.appendChild(provIcon(q.provider)); h.appendChild(ic);
       var nm = el('span', 'qname', q.account); nm.title = q.provider_label + ' · ' + q.account; h.appendChild(nm);
-      var pill = el('span', 'pill ' + q.health, q.health); if (q.health_reason) pill.title = q.health_reason; h.appendChild(pill); c.appendChild(h);
+      var pill = el('span', 'pill ' + q.health, q.health); if (q.reason) pill.title = reasonText(q.reason); h.appendChild(pill); c.appendChild(h);
       var plan = el('div', 'qplan'); var p1 = el('span', '', 'Provider'); p1.appendChild(el('b', '', q.provider_label)); plan.appendChild(p1);
       if (q.plan) { var p2 = el('span', '', 'Plan'); p2.appendChild(el('b', '', q.plan)); plan.appendChild(p2); }
       c.appendChild(plan);
@@ -925,8 +941,8 @@ ul.notes{margin:0;padding-left:18px;font-size:12px;color:var(--text-tertiary)}
         bar.firstChild.style.animationDelay = (wi * 40) + 'ms';
         if (w.mode === 'regen' && w.threshold_percent) { var wrap = el('div', 'threshold-meter'); wrap.appendChild(bar); var mk = el('span', 'mark'); mk.style.left = (100 - w.threshold_percent) + '%'; wrap.appendChild(mk); row.appendChild(wrap); }
         else row.appendChild(bar);
-        if (w.mode === 'regen' && w.known) row.appendChild(el('div', 'qsub', 'next refill ' + absTime(w.resets_at) + (w.full_at ? ' · full ' + absTime(w.full_at) : '') + ' · ' + w.regen_percent + '% / ' + Math.round((w.regen_seconds || 12120) / 60) + ' min · paid stops at ' + w.threshold_percent + '% used'));
-        else if (w.known && w.mode !== 'free') row.appendChild(el('div', 'qsub', 'used ' + pct(w.used_percent, 0) + ' · ' + (w.source || 'unknown') + (w.stale ? ' (stale)' : '')));
+        if (w.mode === 'regen' && w.known) row.appendChild(el('div', 'qsub', 'next refill ' + absTime(w.resets_at) + (w.full_at ? ' · full ' + absTime(w.full_at) : '') + ' · ' + w.regen_percent + '% / ' + Math.round((w.regen_seconds || 12120) / 60) + ' min · paid stops at ' + w.threshold_percent + '% used · ' + sourceText(w.source)));
+        else if (w.known && w.mode !== 'free') row.appendChild(el('div', 'qsub', 'used ' + pct(w.used_percent, 0) + ' · ' + sourceText(w.source) + (w.stale ? ' (stale)' : '')));
         c.appendChild(row);
       });
       if (q.metrics && q.metrics.length) {
@@ -934,7 +950,7 @@ ul.notes{margin:0;padding-left:18px;font-size:12px;color:var(--text-tertiary)}
         q.metrics.forEach(function (x) { var sp = el('span', '', x.label); sp.appendChild(el('b', '', x.value + (x.unit ? ' ' + x.unit : ''))); mt.appendChild(sp); });
         c.appendChild(mt);
       }
-      if (q.health_reason && q.health !== 'healthy') c.appendChild(el('div', 'qmsg', q.health_reason));
+      if (q.reason && q.health !== 'healthy') c.appendChild(el('div', 'qmsg', reasonText(q.reason)));
       grid.appendChild(c);
     });
     var pager = clear($('quota-pager'));

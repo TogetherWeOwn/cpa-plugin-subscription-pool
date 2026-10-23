@@ -3,6 +3,7 @@ package coordinator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
 	"os"
@@ -40,6 +41,10 @@ const (
 	hiddenInfiniteLaneRef = "openai-compatibility:synthetic-infinite:c5e9e38ce3e1"
 	hiddenAccount         = "acct-0123456789"
 	hostileName           = "go-1</script><script>alert(1)</script>"
+	// freeTextMarker stands for upstream error bodies and other free text a
+	// real module puts in health reasons, fallback reasons, sources and
+	// validation errors: none of it may reach the unauthenticated routes.
+	freeTextMarker = "FREE-TEXT-MARKER"
 )
 
 func mustJSON(t *testing.T, value any) json.RawMessage {
@@ -83,18 +88,20 @@ func pageCoordinator(t *testing.T) *Coordinator {
 			{
 				"name": "synthetic#1", "provider": "synthetic", "kind": "paid", "auth_id": hiddenPaidLaneRef, "account": hiddenAccount,
 				"credential_bound": true, "health": "healthy", "next_regen_percent": 2, "in_flight": 1, "peak_in_flight": 7, "max_concurrent": 0,
-				"windows": map[string]any{"weekly": map[string]any{"known": true, "utilization": 0.0442, "resets_at": regen, "source": "quota endpoint (v2)", "authoritative": true}},
+				"windows": map[string]any{"weekly": map[string]any{"known": true, "utilization": 0.0442, "resets_at": regen, "source": "response header (" + freeTextMarker + "-source)", "authoritative": false}},
 				"stats":   map[string]any{"requests": 20, "failures": 1, "output_tokens": 9000, "tps_samples": 20, "median_output_tps": 131.2, "mean_ttft_ms": 900},
 			},
 			{
 				"name": "synthetic-infinite#1", "provider": "synthetic-infinite", "kind": "infinite", "auth_id": hiddenInfiniteLaneRef, "account": hiddenAccount,
-				"credential_bound": true, "health": "healthy", "in_flight": 0, "peak_in_flight": 10, "max_concurrent": 0,
+				"credential_bound": true, "health": "throttled", "health_reason": "busy until 2026-10-23T15:10:00Z: infinite mode returned HTTP 429 " + freeTextMarker + "-health",
+				"in_flight": 0, "peak_in_flight": 10, "max_concurrent": 0,
 				"windows": map[string]any{"weekly": map[string]any{"known": true, "utilization": 0, "source": "infinite mode (free, not metered)"}},
 				"stats":   map[string]any{"requests": 45, "output_tokens": 30000, "tps_samples": 40, "median_output_tps": 5.1, "mean_ttft_ms": 13100},
 			},
 		},
-		"routing":          map[string]any{"paid_picks": 20, "infinite_picks": 45, "fallbacks_to_infinite": 1, "rejections": 0, "infinite_non_stream_picks": 0},
-		"observation_gaps": []string{"resets_at is the next 2% regeneration tick"},
+		"routing": map[string]any{"paid_picks": 20, "infinite_picks": 45, "fallbacks_to_infinite": 1, "rejections": 0, "infinite_non_stream_picks": 0,
+			"last_fallback_reason": "exhausted until 2026-10-23T16:00:00Z: HTTP 429 " + freeTextMarker + "-fallback", "last_fallback_at": pageNow.Add(-time.Minute)},
+		"observation_gaps": []string{freeTextMarker + "-gap"},
 	})
 	zai := &fakeStatusModule{fakeModule: fakeModule{id: "zai"}, status: zaiStatus}
 	opencodeGo := &fakeStatusModule{fakeModule: fakeModule{id: "opencode-go"}, status: opencodeStatus}
@@ -105,6 +112,7 @@ func pageCoordinator(t *testing.T) *Coordinator {
 	c := New(zai, opencodeGo, syn)
 	c.now = func() time.Time { return pageNow }
 	c.registry.swap(map[string]registryEntry{hiddenPaidLaneRef: {providerID: "synthetic"}, hiddenInfiniteLaneRef: {providerID: "synthetic"}})
+	_ = c.recordError(errors.New("provider zai: " + freeTextMarker + "-validation"))
 	return c
 }
 
@@ -127,7 +135,7 @@ func get(c *Coordinator, path string, query url.Values) pluginapi.ManagementResp
 
 func assertRedacted(t *testing.T, body string) {
 	t.Helper()
-	for _, forbidden := range []string{hiddenIdentity, hiddenPaidLaneRef, hiddenInfiniteLaneRef, "openai-compatibility:", hiddenAccount, "retry_after", "zai_runtime_health_v1", "client-key-must-not-leak", "Bearer", "dashboard-api-key", "key_suffix"} {
+	for _, forbidden := range []string{hiddenIdentity, hiddenPaidLaneRef, hiddenInfiniteLaneRef, "openai-compatibility:", hiddenAccount, "retry_after", "zai_runtime_health_v1", "client-key-must-not-leak", "Bearer", "dashboard-api-key", "key_suffix", freeTextMarker, "Too many concurrent requests"} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("usage output contains forbidden %q", forbidden)
 		}
@@ -238,8 +246,17 @@ func TestUsageDataReportsQuotaWindowsAndSyntheticPanel(t *testing.T) {
 	if len(panel.Schedule) != 3 || panel.Schedule[2].RemainingPercent != 100 || panel.Schedule[2].AddsPercent != 0.42 {
 		t.Fatalf("regen schedule = %+v", panel.Schedule)
 	}
-	if panel.Routing.Fallbacks != 1 || panel.Routing.InfinitePicks != 45 {
+	if panel.Routing.Fallbacks != 1 || panel.Routing.InfinitePicks != 45 || panel.Routing.LastFallbackReason != "quota_exhausted" {
 		t.Fatalf("routing = %+v", panel.Routing)
+	}
+	if infinite.Health != "throttled" || infinite.Reason != "resting" || panel.Lanes[1].Reason != "resting" {
+		t.Fatalf("infinite reason = %q / %q, want the closed code resting", infinite.Reason, panel.Lanes[1].Reason)
+	}
+	if weekly.Source != "response_header" || zai.Windows[0].Source != "authoritative" || goCard.Windows[2].Source != "authoritative" {
+		t.Fatalf("sources = %q %q %q", weekly.Source, zai.Windows[0].Source, goCard.Windows[2].Source)
+	}
+	if !data.ValidationFailed || data.Status != "reconfigure_rejected" {
+		t.Fatalf("validation = %v %q", data.ValidationFailed, data.Status)
 	}
 }
 
@@ -361,5 +378,32 @@ func TestUsageAfterShutdownStartsNoBackgroundSave(t *testing.T) {
 	c.ledgerStore.wg.Wait()
 	if _, err := os.Stat(filepath.Join(dir, ledgerSubdir, ledgerStateName)); !os.IsNotExist(err) {
 		t.Fatalf("a usage record after shutdown wrote the ledger (stat err = %v)", err)
+	}
+}
+
+func TestFailedLedgerSaveIsRetriedByTheShutdownFlush(t *testing.T) {
+	dir := t.TempDir()
+	c := pageCoordinator(t)
+	c.attachLedgerStore(dir)
+	usageDir := filepath.Join(dir, ledgerSubdir)
+	// Break the store: a regular file where the usage directory should be.
+	if err := os.RemoveAll(usageDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(usageDir, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_ = c.handleUsage(usageRecord(hiddenPaidLaneRef, "synthetic/glm-5.3", pageNow, 10, 0))
+	c.ledgerStore.wg.Wait()
+	if _, lastErr := c.ledgerPersistenceStatus(); lastErr == "" {
+		t.Fatal("the broken store did not report a save error")
+	}
+	// Repair the disk; the flush must write what the failed save could not.
+	if err := os.Remove(usageDir); err != nil {
+		t.Fatal(err)
+	}
+	c.flushLedger()
+	if _, err := os.Stat(filepath.Join(usageDir, ledgerStateName)); err != nil {
+		t.Fatalf("shutdown flush did not retry the failed save: %v", err)
 	}
 }

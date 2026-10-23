@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
@@ -130,9 +131,6 @@ func TestStateRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if l.Dirty() {
-		t.Fatal("MarshalState must clear dirty")
-	}
 	restored := New()
 	if err := restored.UnmarshalState(raw, now); err != nil {
 		t.Fatal(err)
@@ -143,5 +141,86 @@ func TestStateRoundTrip(t *testing.T) {
 	}
 	if err := restored.UnmarshalState([]byte(`{"version":9}`), now); err == nil {
 		t.Fatal("unknown state version accepted")
+	}
+}
+
+func TestLabelTruncationKeepsValidUTF8AcrossPersistence(t *testing.T) {
+	long := strings.Repeat("a", 119) + "é" + "zzzz"
+	for _, label := range []string{long, strings.Repeat("é", 70), strings.Repeat("€", 50)} {
+		got := clean(label, "x")
+		if !utf8.ValidString(got) || len(got) > maxLabel {
+			t.Fatalf("clean(%q) = %q (valid=%v, %d bytes)", label, got, utf8.ValidString(got), len(got))
+		}
+	}
+	l := New()
+	now := base.Add(time.Minute)
+	l.Record("synthetic", long, record(base, long, 30, 0), now)
+	raw, err := l.MarshalState(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored := New()
+	if err := restored.UnmarshalState(raw, now); err != nil {
+		t.Fatal(err)
+	}
+	restored.Record("synthetic", long, record(base, long, 30, 0), now)
+	if got := restored.Query(RangeByID("1h"), now).Totals; len(got) != 1 || got[0].Requests != 2 {
+		t.Fatalf("after restart the same long label split into %d rows: %+v", len(got), got)
+	}
+}
+
+func TestPersistedStateStaysUnderTheStoreLimitAtWorstCase(t *testing.T) {
+	l := New()
+	now := base
+	big := pluginapi.UsageRecord{Latency: time.Hour, TTFT: time.Minute, Detail: pluginapi.UsageDetail{InputTokens: 1 << 40, OutputTokens: 1 << 40, ReasoningTokens: 1 << 40, CachedTokens: 1 << 40, TotalTokens: 1 << 41}, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: 429}}
+	// Every fine and coarse bucket full to the row cap with long distinct labels.
+	for minutes := 0; minutes < int(CoarseRetention/time.Minute); minutes += 5 {
+		at := now.Add(-time.Duration(minutes) * time.Minute)
+		for row := 0; row < maxRowsPerBucket; row++ {
+			big.RequestedAt = at
+			big.Alias = strings.Repeat("m", 90) + string(rune('A'+row%26)) + time.Duration(row).String()
+			l.Record("opencode-go", strings.Repeat("a", 100)+time.Duration(row%7).String(), big, now)
+		}
+	}
+	raw, err := l.MarshalState(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) >= maxStateBytes || maxStateBytes >= 8<<20 {
+		t.Fatalf("state = %d bytes, budget %d, store limit %d", len(raw), maxStateBytes, 8<<20)
+	}
+	restored := New()
+	if err := restored.UnmarshalState(raw, now); err != nil {
+		t.Fatal(err)
+	}
+	// The newest fine buckets and the coarse totals survive the budget.
+	if hour := restored.Query(RangeByID("1h"), now); len(hour.Totals) == 0 {
+		t.Fatal("newest fine buckets were dropped")
+	}
+	week := restored.Query(RangeByID("7d"), now)
+	if len(week.Totals) == 0 {
+		t.Fatal("coarse totals were dropped")
+	}
+}
+
+func TestMarshalStateKeepsDirtyUntilMarkedSaved(t *testing.T) {
+	l := New()
+	l.Record("zai", "a", record(base, "m", 1, 0), base)
+	_, generation, err := l.MarshalStateGeneration(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !l.Dirty() {
+		t.Fatal("marshal alone must not clear dirty: the write may still fail")
+	}
+	l.Record("zai", "a", record(base, "m", 1, 0), base)
+	l.MarkSaved(generation)
+	if !l.Dirty() {
+		t.Fatal("a record that arrived during the write must keep the ledger dirty")
+	}
+	_, generation, _ = l.MarshalStateGeneration(base)
+	l.MarkSaved(generation)
+	if l.Dirty() {
+		t.Fatal("MarkSaved with the current generation must clear dirty")
 	}
 }
