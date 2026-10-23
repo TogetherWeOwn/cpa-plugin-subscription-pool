@@ -141,7 +141,7 @@ func fetchQuota(ctx context.Context, client httpDoer, endpoint, apiKey string) (
 	if err != nil {
 		return quotaReading{}, fmt.Errorf("quota request failed")
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxQuotaResponse+1))
 	if err != nil {
 		return quotaReading{}, fmt.Errorf("read quota response")
