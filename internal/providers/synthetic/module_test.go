@@ -892,3 +892,37 @@ func TestFailedLaneLabelsSaveIsRetried(t *testing.T) {
 		t.Fatalf("names after recovery + restart = %v, want %v", after, before)
 	}
 }
+
+func TestANewAuthDirectorysSavedLabelsWin(t *testing.T) {
+	first, second := t.TempDir(), t.TempDir()
+	m := newPersistentModule(t, first, twoAccountCompats()...)
+	before := laneNames(t, m)
+	var swapped []string
+	for id, name := range before {
+		if strings.HasPrefix(name, "synthetic#") {
+			swapped = append(swapped, id)
+		}
+	}
+	if len(swapped) != 2 {
+		t.Fatalf("paid lanes = %v", before)
+	}
+	// The second directory saved the two paid credentials the other way round.
+	writeLabels(t, second, fmt.Sprintf(`{"version":1,"lanes":{%q:{"provider":"synthetic","ordinal":%d},%q:{"provider":"synthetic","ordinal":%d}}}`,
+		swapped[0], 3-mustOrdinal(t, before[swapped[0]]), swapped[1], 3-mustOrdinal(t, before[swapped[1]])))
+	reconfigureIn(t, m, second, twoAccountCompats()...)
+	after := laneNames(t, m)
+	for _, id := range swapped {
+		if want := fmt.Sprintf("synthetic#%d", 3-mustOrdinal(t, before[id])); after[id] != want {
+			t.Fatalf("lane %s = %q in the new directory, want its saved %q", id, after[id], want)
+		}
+	}
+}
+
+func mustOrdinal(t *testing.T, name string) int {
+	t.Helper()
+	var ordinal int
+	if _, err := fmt.Sscanf(name[strings.LastIndex(name, "#")+1:], "%d", &ordinal); err != nil {
+		t.Fatalf("lane name %q has no ordinal", name)
+	}
+	return ordinal
+}
