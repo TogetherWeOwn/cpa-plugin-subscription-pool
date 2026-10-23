@@ -18,6 +18,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- synthetic lane names are `<provider>#<6 hex>`, derived from the credential's auth ID, instead of positional `#1`, `#2`. Reordering api-key entries no longer moves a name, or the usage history keyed by it, to another key.
+- Shutdown waits for usage records being handled before the final ledger save.
 - The usage page runs one inline script under a per-response CSP nonce and fetches `usage.json` from its own origin (`connect-src 'self'`); it still has no `frame-ancestors`, so cross-origin Management Center frames keep working.
 
 ## [0.5.0] - 2026-10-23

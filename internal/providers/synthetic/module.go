@@ -294,7 +294,6 @@ func discoverLanes(cfg moduleConfig, compats []providermodule.OpenAICompatibilit
 	lanes := make(map[string]*lane)
 	accounts := make(map[string]*account)
 	idGen := newStableIDGenerator()
-	counters := make(map[string]int)
 	for _, compat := range compats {
 		if compat.Disabled {
 			continue
@@ -322,9 +321,11 @@ func discoverLanes(cfg moduleConfig, compats []providermodule.OpenAICompatibilit
 			} else {
 				id = idGen.next(idKind, key, base, strings.TrimSpace(entry.ProxyURL))
 			}
-			counters[name]++
 			item := &lane{
-				Name:     fmt.Sprintf("%s#%d", name, counters[name]),
+				// Named after the credential (a short hash of its auth ID),
+				// not its position, so reordering api-key entries never moves
+				// a name, and the usage history keyed by it, to another key.
+				Name:     name + "#" + shortHash(id)[:6],
 				Provider: name,
 				Kind:     kind,
 				AuthID:   id,
@@ -579,7 +580,7 @@ func (m *Module) RecognizeUsage(record pluginapi.UsageRecord) bool {
 }
 
 // UsageAccount names the lane a usage record belongs to (for example
-// "synthetic#1" or "synthetic-infinite#1") for the coordinator's usage
+// "synthetic#3f9a1c" or "synthetic-infinite#c02e7b") for the coordinator's usage
 // ledger. HandleUsage has already created a learned lane for an unknown auth
 // ID of a configured provider, so every accepted record resolves.
 func (m *Module) UsageAccount(record pluginapi.UsageRecord) string {

@@ -577,8 +577,8 @@ func TestSummarizeBodyExtractsErrorText(t *testing.T) {
 
 func TestUsageAccountAndPeakInFlight(t *testing.T) {
 	m, _ := newTestModule(t, "{}")
-	if got := m.UsageAccount(pluginapi.UsageRecord{AuthID: paidAuthID}); got != "synthetic#1" {
-		t.Fatalf("UsageAccount(paid) = %q, want synthetic#1", got)
+	if got := m.UsageAccount(pluginapi.UsageRecord{AuthID: paidAuthID}); got != "synthetic#"+shortHash(paidAuthID)[:6] {
+		t.Fatalf("UsageAccount(paid) = %q, want the credential-derived lane name", got)
 	}
 	if got := m.UsageAccount(pluginapi.UsageRecord{AuthID: "unknown"}); got != "" {
 		t.Fatalf("UsageAccount(unknown) = %q, want empty", got)
@@ -591,6 +591,34 @@ func TestUsageAccountAndPeakInFlight(t *testing.T) {
 		lane := item.(map[string]any)
 		if lane["kind"] == "infinite" && (lane["peak_in_flight"].(float64) != 2 || lane["in_flight"].(float64) != 1 || lane["peak_in_flight_at"] == nil) {
 			t.Fatalf("infinite lane = %v, want peak 2 and in-flight 1", lane)
+		}
+	}
+}
+
+func TestLaneNamesStayWithTheirCredentialWhenEntriesAreReordered(t *testing.T) {
+	m, _ := newTestModule(t, "{}", twoAccountCompats()...)
+	before := map[string]string{}
+	m.mu.Lock()
+	for id, item := range m.lanes {
+		before[id] = item.Name
+	}
+	m.mu.Unlock()
+	reordered := twoAccountCompats()
+	for i := range reordered {
+		entries := reordered[i].APIKeyEntries
+		reordered[i].APIKeyEntries = []providermodule.OpenAICompatibilityAPIKey{entries[1], entries[0]}
+	}
+	if err := m.Reconfigure(context.Background(), hostWith(reordered...), json.RawMessage("{}")); err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.lanes) != len(before) {
+		t.Fatalf("lanes = %d, want %d", len(m.lanes), len(before))
+	}
+	for id, item := range m.lanes {
+		if before[id] != item.Name {
+			t.Fatalf("lane %s renamed %q -> %q after reordering the key entries; usage history would follow the wrong credential", id, before[id], item.Name)
 		}
 	}
 }

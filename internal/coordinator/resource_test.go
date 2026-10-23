@@ -407,3 +407,51 @@ func TestFailedLedgerSaveIsRetriedByTheShutdownFlush(t *testing.T) {
 		t.Fatalf("shutdown flush did not retry the failed save: %v", err)
 	}
 }
+
+// blockingUsageModule holds HandleUsage until released, to overlap a usage
+// record with Shutdown.
+type blockingUsageModule struct {
+	fakeStatusModule
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (m *blockingUsageModule) HandleUsage(context.Context, pluginapi.UsageRecord) error {
+	close(m.entered)
+	<-m.release
+	return nil
+}
+
+func TestShutdownWaitsForInFlightUsageBeforeTheFinalFlush(t *testing.T) {
+	dir := t.TempDir()
+	blocking := &blockingUsageModule{
+		fakeStatusModule: fakeStatusModule{fakeModule: fakeModule{id: "synthetic"}, status: json.RawMessage(`{}`), accounts: map[string]string{hiddenPaidLaneRef: "lane-a"}},
+		entered:          make(chan struct{}), release: make(chan struct{}),
+	}
+	c := New(blocking)
+	c.now = func() time.Time { return pageNow }
+	c.registry.swap(map[string]registryEntry{hiddenPaidLaneRef: {providerID: "synthetic"}})
+	c.attachLedgerStore(dir)
+	c.ledgerStore.savedAt = pageNow // no background save during the test
+	go func() { _ = c.handleUsage(usageRecord(hiddenPaidLaneRef, "m", pageNow, 1, 0)) }()
+	<-blocking.entered
+	done := make(chan struct{})
+	go func() { _ = c.Shutdown(); close(done) }()
+	select {
+	case <-done:
+		t.Fatal("Shutdown returned while a usage record was still being handled")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(blocking.release)
+	<-done
+	restored := New(&fakeModule{id: "synthetic"})
+	restored.now = func() time.Time { return pageNow }
+	restored.attachLedgerStore(dir)
+	var data usagePageData
+	if err := json.Unmarshal(get(restored, resourceUsageDataPath, url.Values{"range": {"1h"}}).Body, &data); err != nil {
+		t.Fatal(err)
+	}
+	if len(data.Usage.Totals) != 1 || data.Usage.Totals[0].Account != "lane-a" {
+		t.Fatalf("persisted usage after shutdown = %+v, want the record handled during shutdown", data.Usage.Totals)
+	}
+}

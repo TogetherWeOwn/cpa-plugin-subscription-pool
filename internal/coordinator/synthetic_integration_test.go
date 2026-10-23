@@ -149,7 +149,13 @@ func TestCoordinatorRegistersWithoutZaiAndRoutesSynthetic(t *testing.T) {
 	if !kinds["paid"] || !kinds["infinite"] || data.Synthetic == nil {
 		t.Fatalf("usage data missing synthetic lanes: %+v", data.Quota)
 	}
-	if len(data.Usage.Totals) != 1 || data.Usage.Totals[0].Account != "synthetic#1" || data.Usage.Totals[0].Status429 != 1 {
+	paidLane := ""
+	for _, card := range data.Quota {
+		if card.Provider == "synthetic" && card.Kind == "paid" {
+			paidLane = card.Account
+		}
+	}
+	if len(data.Usage.Totals) != 1 || !strings.HasPrefix(paidLane, "synthetic#") || data.Usage.Totals[0].Account != paidLane || data.Usage.Totals[0].Status429 != 1 {
 		t.Fatalf("usage totals = %+v", data.Usage.Totals)
 	}
 }

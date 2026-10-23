@@ -47,6 +47,9 @@ type Coordinator struct {
 	registry registry
 
 	reconfigures sync.WaitGroup
+	// usage counts handleUsage calls in progress; Shutdown waits for them
+	// before its final ledger flush, so no accepted record misses it.
+	usage sync.WaitGroup
 
 	// ledger counts every usage record a hosted module accepts, for the
 	// usage page; ledgerStore persists it under the plugin's auth dir.
@@ -224,6 +227,17 @@ func (c *Coordinator) pick(req pluginapi.SchedulerPickRequest) (pluginapi.Schedu
 // map to any hosted module is a silent no-op, matching the pre-coordinator
 // behavior of ignoring usage records belonging to other CPA providers.
 func (c *Coordinator) handleUsage(record pluginapi.UsageRecord) error {
+	// Register under the same lock Shutdown uses to set stopped, so no
+	// handler can start between Shutdown's drain and its final flush.
+	c.mu.RLock()
+	if c.stopped {
+		c.mu.RUnlock()
+		return nil
+	}
+	c.usage.Add(1)
+	c.mu.RUnlock()
+	defer c.usage.Done()
+
 	providerID := c.registry.providerFor(strings.TrimSpace(record.AuthID))
 	if providerID == "" {
 		providerID = c.usageClaimant(record)
@@ -350,6 +364,7 @@ func (c *Coordinator) shutdown() error {
 	c.mu.Unlock()
 
 	c.reconfigures.Wait()
+	c.usage.Wait()
 	c.flushLedger()
 
 	var firstErr error
