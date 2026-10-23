@@ -24,6 +24,7 @@ import (
 // free ordinal, so a rotated key inherits the ordinal of the key it
 // replaced. Learned lanes (credentials seen at runtime but absent from the
 // last reconfigure) are "<provider>#learned-<n>" for the process lifetime.
+// Every label-store failure is soft: scheduling never depends on it.
 const (
 	laneLabelsName    = "lane-labels.state"
 	laneLabelsVersion = 1
@@ -146,42 +147,37 @@ func saveLaneLabels(dir string, labels map[string]laneLabel) error {
 // nameLanesLocked assigns lane names for a Reconfigure and persists the
 // assignment when it changed. The caller holds m.labelsMu (not m.mu). It
 // returns the error to show on the authenticated status, or "".
+//
+// A label file that cannot be read is never overwritten: it may come from
+// a newer plugin version or be unreadable only for now. Until a load
+// succeeds, names stick within the process, nothing is saved, and every
+// Reconfigure retries the load. Once it loads, the file is authoritative.
 func (m *Module) nameLanesLocked(authDir string, order []string, lanes map[string]*lane) string {
 	if m.labels == nil {
 		m.labels = make(map[string]laneLabel)
 	}
 	dir := laneLabelsDir(authDir)
 	if dir != m.labelsDir {
-		m.labelsDir, m.labelsLoaded, m.labelsSaved, m.labelsLoadErr = dir, false, false, ""
+		m.labelsDir, m.labelsLoaded, m.labelsSaved = dir, false, false
 	}
 	if dir != "" && !m.labelsLoaded {
-		m.labelsLoaded = true
 		saved, err := loadLaneLabels(dir)
 		if err != nil {
-			// Names fall back to config order and the next save replaces
-			// the unreadable file; the failure stays visible meanwhile.
-			m.labelsLoadErr = bounded(err.Error(), 256)
-		} else {
-			// Merge, so credentials named before a store came into view
-			// keep their names where the saved file has no claim.
-			for id, label := range saved {
-				m.labels[id] = label
-			}
-			m.labelsSaved = true
+			m.labels = assignLaneNames(order, lanes, m.labels)
+			return bounded(err.Error(), 256)
 		}
+		m.labels, m.labelsLoaded, m.labelsSaved = saved, true, true
 	}
 	next := assignLaneNames(order, lanes, m.labels)
 	changed := !sameLabels(next, m.labels)
 	m.labels = next
-	if dir == "" {
+	if dir == "" || (!changed && m.labelsSaved) {
 		return ""
 	}
-	if changed || !m.labelsSaved {
-		if err := saveLaneLabels(dir, next); err != nil {
-			m.labelsSaved = false
-			return bounded(err.Error(), 256)
-		}
-		m.labelsSaved = true
+	if err := saveLaneLabels(dir, next); err != nil {
+		m.labelsSaved = false
+		return bounded(err.Error(), 256)
 	}
-	return m.labelsLoadErr
+	m.labelsSaved = true
+	return ""
 }

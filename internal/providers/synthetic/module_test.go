@@ -775,24 +775,120 @@ func TestANewCredentialTakesTheFreedOrdinal(t *testing.T) {
 	}
 }
 
-func TestCorruptLaneLabelsFallBackToConfigOrder(t *testing.T) {
-	authDir := t.TempDir()
-	dir := filepath.Join(authDir, "providers", providerID)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+func labelsPath(authDir string) string {
+	return filepath.Join(authDir, "providers", providerID, laneLabelsName)
+}
+
+func writeLabels(t *testing.T, authDir, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(labelsPath(authDir)), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, laneLabelsName), []byte("{not json"), 0o600); err != nil {
+	if err := os.WriteFile(labelsPath(authDir), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func reconfigureIn(t *testing.T, m *Module, authDir string, compats ...providermodule.OpenAICompatibility) {
+	t.Helper()
+	host := hostWith(compats...)
+	host.AuthDir = authDir
+	if err := m.Reconfigure(context.Background(), host, json.RawMessage("{}")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUnreadableLaneLabelsAreKeptAndRetried(t *testing.T) {
+	for name, content := range map[string]string{
+		"corrupt":        "{not json",
+		"newer version":  `{"version":2,"lanes":{}}`,
+		"unknown fields": `{"version":1,"lanes":{},"extra":true}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			authDir := t.TempDir()
+			writeLabels(t, authDir, content)
+			m := newPersistentModule(t, authDir, twoAccountCompats()...)
+			names := map[string]bool{}
+			for _, lane := range laneNames(t, m) {
+				names[lane] = true
+			}
+			if len(names) != 4 || !names["synthetic#1"] || !names["synthetic#2"] || !names["synthetic-infinite#1"] || !names["synthetic-infinite#2"] {
+				t.Fatalf("names = %v, want ordinals while the file is unreadable", names)
+			}
+			if got, _ := statusOf(t, m)["lane_labels_error"].(string); !strings.Contains(got, "read lane labels") {
+				t.Fatalf("lane_labels_error = %q, want the read failure on the authenticated status", got)
+			}
+			reconfigureIn(t, m, authDir, reorderedCompats()...)
+			if raw, _ := os.ReadFile(labelsPath(authDir)); string(raw) != content {
+				t.Fatalf("an unreadable labels file was overwritten with %q", raw)
+			}
+			// Once the operator removes it, the next reconfigure saves.
+			if err := os.Remove(labelsPath(authDir)); err != nil {
+				t.Fatal(err)
+			}
+			reconfigureIn(t, m, authDir, twoAccountCompats()...)
+			if got, _ := statusOf(t, m)["lane_labels_error"].(string); got != "" {
+				t.Fatalf("lane_labels_error = %q after the file was removed", got)
+			}
+			if _, err := os.Stat(labelsPath(authDir)); err != nil {
+				t.Fatalf("labels not saved after recovery: %v", err)
+			}
+		})
+	}
+}
+
+func TestSavedLaneLabelsAreValidated(t *testing.T) {
+	authDir := t.TempDir()
+	gen := newStableIDGenerator()
+	first := gen.next("openai-compatibility:synthetic", testKey, testBase, "")
+	second := gen.next("openai-compatibility:synthetic", testKey+"-second", testBase, "")
+	infinite := newStableIDGenerator().next("openai-compatibility:synthetic-infinite", testKey, testBase, "")
+	// second claims #7; first claims #7 too (duplicate) and the infinite lane
+	// claims the paid provider (mismatch); a zero ordinal and an empty ID
+	// are invalid.
+	writeLabels(t, authDir, fmt.Sprintf(`{"version":1,"lanes":{%q:{"provider":"synthetic","ordinal":7},%q:{"provider":"synthetic","ordinal":7},%q:{"provider":"synthetic","ordinal":3},"x":{"provider":"synthetic","ordinal":0},"":{"provider":"synthetic","ordinal":4}}}`, second, first, infinite))
+	m := newPersistentModule(t, authDir, twoAccountCompats()...)
+	names := laneNames(t, m)
+	// Config order lists first before second, so first keeps the contested
+	// #7 and second takes the lowest free ordinal.
+	if names[first] != "synthetic#7" || names[second] != "synthetic#1" || names[infinite] != "synthetic-infinite#1" {
+		t.Fatalf("names = %v", names)
+	}
+	var saved laneLabelsFile
+	raw, _ := os.ReadFile(labelsPath(authDir))
+	if err := json.Unmarshal(raw, &saved); err != nil {
+		t.Fatal(err)
+	}
+	if len(saved.Lanes) != 4 || saved.Lanes[first].Ordinal != 7 || saved.Lanes[second].Ordinal != 1 || saved.Lanes[infinite].Provider != "synthetic-infinite" {
+		t.Fatalf("saved labels = %+v", saved.Lanes)
+	}
+}
+
+func TestFailedLaneLabelsSaveIsRetried(t *testing.T) {
+	authDir := t.TempDir()
+	// A regular file where the module's directory belongs breaks the store.
+	if err := os.MkdirAll(filepath.Join(authDir, "providers"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	blocker := filepath.Join(authDir, "providers", providerID)
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	m := newPersistentModule(t, authDir, twoAccountCompats()...)
-	names := map[string]bool{}
-	for _, name := range laneNames(t, m) {
-		names[name] = true
+	if got, _ := statusOf(t, m)["lane_labels_error"].(string); got == "" {
+		t.Fatal("a broken label store reported no error")
 	}
-	if !names["synthetic#1"] || !names["synthetic#2"] || len(names) != 4 {
-		t.Fatalf("names = %v, want ordinals after a corrupt labels file", names)
+	before := laneNames(t, m)
+	if err := os.Remove(blocker); err != nil {
+		t.Fatal(err)
 	}
-	if got, _ := statusOf(t, m)["lane_labels_error"].(string); !strings.Contains(got, "read") {
-		t.Fatalf("status lane_labels_error = %q, want the read failure on the authenticated route", got)
+	// Same config: nothing changed, but the assignment was never saved.
+	reconfigureIn(t, m, authDir, twoAccountCompats()...)
+	if got, _ := statusOf(t, m)["lane_labels_error"].(string); got != "" {
+		t.Fatalf("lane_labels_error = %q after the store recovered", got)
+	}
+	restarted := newPersistentModule(t, authDir, reorderedCompats()...)
+	if after := laneNames(t, restarted); !reflect.DeepEqual(before, after) {
+		t.Fatalf("names after recovery + restart = %v, want %v", after, before)
 	}
 }

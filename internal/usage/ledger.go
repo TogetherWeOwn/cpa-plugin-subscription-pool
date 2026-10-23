@@ -173,10 +173,10 @@ func (t *tier) add(at time.Time, key Key, delta Counters) {
 	}
 	row := rows[key]
 	if row == nil {
-		// Overflow rows are reserved and never take one of the
-		// maxRowsPerBucket ordinary slots, so restoring a full bucket (whose
-		// overflow row sorts first) keeps every key it tracked.
-		if !isOverflow(key) && ordinaryRows(rows) >= maxRowsPerBucket {
+		// Overflow rows are reserved: ordinaryRows does not count them, so
+		// restoring a full bucket (whose overflow row sorts first) keeps
+		// every key it tracked. An overflow key maps to itself here.
+		if ordinaryRows(rows) >= maxRowsPerBucket {
 			key = overflowKey(key.Provider)
 			row = rows[key]
 		}
@@ -530,6 +530,12 @@ func (l *Ledger) MarshalState(now time.Time) ([]byte, error) {
 // any older coarse bucket. Where a tier lost buckets, the state records the
 // instant its history is complete from, and Query reports it.
 func (l *Ledger) MarshalStateGeneration(now time.Time) ([]byte, uint64, error) {
+	return l.marshalWithin(now, maxStateBytes)
+}
+
+// marshalWithin is MarshalStateGeneration with the byte limit as a
+// parameter, so tests can check the accounting at any size.
+func (l *Ledger) marshalWithin(now time.Time, limit int) ([]byte, uint64, error) {
 	l.mu.Lock()
 	l.pruneLocked(now)
 	state := persisted{Version: stateVersion, Records: l.records, Keys: [][3]string{}, Fine: []persistBucket{}, Coarse: []persistBucket{}}
@@ -546,7 +552,7 @@ func (l *Ledger) MarshalStateGeneration(now time.Time) ([]byte, uint64, error) {
 		l.mu.Unlock()
 		return nil, 0, err
 	}
-	budget := maxStateBytes - len(header)
+	budget := limit - len(header)
 
 	type candidate struct {
 		fine  bool
@@ -580,7 +586,11 @@ func (l *Ledger) MarshalStateGeneration(now time.Time) ([]byte, uint64, error) {
 			rows = l.fine.buckets[item.start]
 		}
 		bucket := persistBucket{Start: item.start, Rows: make([][]int64, 0, len(rows))}
+		// The bucket with its separator, plus the commas between its rows.
 		cost := len(`{"t":,"r":[]},`) + numberLen(item.start)
+		if len(rows) > 1 {
+			cost += len(rows) - 1
+		}
 		var added [][3]string
 		for _, key := range sortedKeys(rows) {
 			id, ok := index[key]
@@ -597,7 +607,7 @@ func (l *Ledger) MarshalStateGeneration(now time.Time) ([]byte, uint64, error) {
 			}
 			row := append([]int64{id}, rows[key].values()...)
 			bucket.Rows = append(bucket.Rows, row)
-			cost += len("[],") + len(row) - 1
+			cost += len("[]") + len(row) - 1
 			for _, value := range row {
 				cost += numberLen(value)
 			}
@@ -638,8 +648,8 @@ func (l *Ledger) MarshalStateGeneration(now time.Time) ([]byte, uint64, error) {
 	generation := l.generation
 	l.mu.Unlock()
 	raw, err := json.Marshal(state)
-	if err == nil && len(raw) > maxStateBytes {
-		err = fmt.Errorf("usage ledger state: encoded %d bytes, over the %d-byte budget", len(raw), maxStateBytes)
+	if err == nil && len(raw) > limit {
+		err = fmt.Errorf("usage ledger state: encoded %d bytes, over the %d-byte budget", len(raw), limit)
 	}
 	return raw, generation, err
 }

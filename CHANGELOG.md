@@ -18,7 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
-- synthetic lane names are ordinals per provider (`synthetic#1`, `synthetic-infinite#2`), never derived from a credential, and they stick to their credential: the auth ID to ordinal assignment is kept server-side in `<auth-dir>/subscription-pool/providers/synthetic/lane-labels.state`, so reordering api-key entries, live or across a restart, no longer moves a name, or the usage history keyed by it, to another key. A new credential takes its provider's lowest free ordinal (a rotated key inherits the replaced key's name). Learned lanes are `<provider>#learned-<n>`. A label-store failure is soft and shows as `lane_labels_error` on the authenticated status.
+- synthetic lane names are ordinals per provider (`synthetic#1`, `synthetic-infinite#2`), never derived from a credential, and they stick to their credential: the auth ID to ordinal assignment is kept server-side in `<auth-dir>/subscription-pool/providers/synthetic/lane-labels.state`, so reordering api-key entries, live or across a restart, no longer moves a name, or the usage history keyed by it, to another key. A new credential takes its provider's lowest free ordinal (a rotated key inherits the replaced key's name). Learned lanes are `<provider>#learned-<n>`. A label-store failure is soft and shows as `lane_labels_error` on the authenticated status; an unreadable label file is never overwritten.
 - Shutdown waits for usage records being handled before the final ledger save.
 - The usage page runs one inline script under a per-response CSP nonce and fetches `usage.json` from its own origin (`connect-src 'self'`); it still has no `frame-ancestors`, so cross-origin Management Center frames keep working.
 

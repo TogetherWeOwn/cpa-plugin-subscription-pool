@@ -1,6 +1,7 @@
 package usage
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -466,4 +467,120 @@ func TestCoverageMarkerSurvivesTheNextSaveAndExpiresWithRetention(t *testing.T) 
 	if saved, _ := l.MarshalState(later); strings.Contains(string(saved), "coarse_from") {
 		t.Fatal("an expired coverage marker was saved again")
 	}
+}
+
+// TestByteAccountingIsExactAtEveryLimit sweeps the byte limit across a
+// ledger with escaped, multibyte and control-character labels: every
+// result must fit (an under-count fails here), keep a newest-first prefix
+// of both tiers, and leave no room for the next bucket (an over-count
+// fails the tightness check).
+func TestByteAccountingIsExactAtEveryLimit(t *testing.T) {
+	l := New()
+	now := base
+	labels := []string{"plain", "<&>\"\\", "é€😀", "ctl\x01\x1f", strings.Repeat("<", 40)}
+	for hour := 0; hour < 60; hour++ {
+		at := now.Add(-time.Duration(hour) * 30 * time.Minute)
+		for i, label := range labels {
+			l.Record("synthetic", fmt.Sprintf("lane#%d", i%2+1), record(at, fmt.Sprintf("%s-%d", label, hour%7), int64(10+hour*i), []int{0, 429, 503}[i%3]), now)
+		}
+	}
+	full, _, err := l.marshalWithin(now, 1<<30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var all persisted
+	if err := json.Unmarshal(full, &all); err != nil {
+		t.Fatal(err)
+	}
+	// The accounting reserves room for the two coverage markers' widest
+	// values and over-counts one comma per non-empty array; nothing else.
+	slack := 3 + 2*len(`,"coarse_from":9223372036854775807`)
+	previous := 0
+	for limit := 200; limit <= len(full)+slack+97; limit += 97 {
+		raw, _, err := l.marshalWithin(now, limit)
+		if err != nil {
+			t.Fatalf("limit %d: %v", limit, err)
+		}
+		if len(raw) > limit {
+			t.Fatalf("limit %d: encoded %d bytes", limit, len(raw))
+		}
+		var got persisted
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatal(err)
+		}
+		kept := len(got.Fine) + len(got.Coarse)
+		if kept < previous {
+			t.Fatalf("limit %d keeps %d buckets, fewer than a smaller limit (%d)", limit, kept, previous)
+		}
+		previous = kept
+		// Tightness: re-encoding with the next newest dropped bucket added
+		// must exceed the limit, less the fixed reserve for the two
+		// coverage markers' widest values and one comma per array.
+		if kept < len(all.Fine)+len(all.Coarse) {
+			if grown := encodeWithNextBucket(t, l, now, got); len(grown) <= limit-slack {
+				t.Fatalf("limit %d: kept %d bytes but %d bytes with the next bucket would fit", limit, len(raw), len(grown))
+			}
+		}
+	}
+	if previous != len(all.Fine)+len(all.Coarse) {
+		t.Fatalf("the largest limit kept %d of %d buckets", previous, len(all.Fine)+len(all.Coarse))
+	}
+	if raw, _, err := l.marshalWithin(now, len(full)+slack); err != nil || !bytes.Equal(raw, full) {
+		t.Fatalf("a limit of the full size plus the reserve must keep everything: %d bytes, %v", len(raw), err)
+	}
+}
+
+// encodeWithNextBucket appends the newest bucket state left out (by the
+// same newest-first order MarshalState uses) and re-encodes it.
+func encodeWithNextBucket(t *testing.T, l *Ledger, now time.Time, state persisted) []byte {
+	t.Helper()
+	keptFine, keptCoarse := map[int64]bool{}, map[int64]bool{}
+	for _, b := range state.Fine {
+		keptFine[b.Start] = true
+	}
+	for _, b := range state.Coarse {
+		keptCoarse[b.Start] = true
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	best, bestFine, found := int64(0), false, false
+	for start := range l.fine.buckets {
+		if !keptFine[start] && (!found || start > best || (start == best && !bestFine)) {
+			best, bestFine, found = start, true, true
+		}
+	}
+	for start := range l.coarse.buckets {
+		if !keptCoarse[start] && (!found || start > best) {
+			best, bestFine, found = start, false, true
+		}
+	}
+	rows := l.coarse.buckets[best]
+	if bestFine {
+		rows = l.fine.buckets[best]
+	}
+	index := map[[3]string]int64{}
+	for i, key := range state.Keys {
+		index[key] = int64(i)
+	}
+	bucket := persistBucket{Start: best}
+	for _, key := range sortedKeys(rows) {
+		label := [3]string{key.Provider, key.Account, key.Model}
+		id, ok := index[label]
+		if !ok {
+			id = int64(len(state.Keys))
+			index[label] = id
+			state.Keys = append(state.Keys, label)
+		}
+		bucket.Rows = append(bucket.Rows, append([]int64{id}, rows[key].values()...))
+	}
+	if bestFine {
+		state.Fine = append(state.Fine, bucket)
+	} else {
+		state.Coarse = append(state.Coarse, bucket)
+	}
+	raw, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
 }

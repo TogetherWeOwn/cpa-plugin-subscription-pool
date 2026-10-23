@@ -137,12 +137,11 @@ type Module struct {
 
 	// labelsMu serializes lane naming and its persistence across
 	// Reconfigure calls; it is never taken while holding mu.
-	labelsMu      sync.Mutex
-	labels        map[string]laneLabel
-	labelsDir     string
-	labelsLoaded  bool
-	labelsSaved   bool
-	labelsLoadErr string
+	labelsMu     sync.Mutex
+	labels       map[string]laneLabel
+	labelsDir    string
+	labelsLoaded bool
+	labelsSaved  bool
 	// labelsErr (under mu) is the last lane-labels failure, for status.
 	labelsErr  string
 	learnedSeq map[string]int
