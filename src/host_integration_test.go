@@ -18,9 +18,9 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginhost"
 	"gopkg.in/yaml.v3"
 
-	"github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/internal/abiclient"
-	"github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/internal/coordinator"
-	"github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/internal/providers/zai"
+	"github.com/TogetherWeOwn/cpa-plugin-subscription-pool/internal/abiclient"
+	"github.com/TogetherWeOwn/cpa-plugin-subscription-pool/internal/coordinator"
+	"github.com/TogetherWeOwn/cpa-plugin-subscription-pool/internal/providers/zai"
 )
 
 const fixtureKey = "test-only-host-integration-key"

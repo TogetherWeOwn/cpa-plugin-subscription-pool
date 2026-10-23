@@ -1,6 +1,6 @@
 # Contributing
 
-Thank you for improving `cpa-plugin-zai-coding-plan`.
+Thank you for improving `cpa-plugin-subscription-pool`.
 
 ## Before you start
 

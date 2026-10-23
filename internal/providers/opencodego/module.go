@@ -18,7 +18,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 
-	"github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/internal/providermodule"
+	"github.com/TogetherWeOwn/cpa-plugin-subscription-pool/internal/providermodule"
 )
 
 const (
@@ -131,8 +131,16 @@ func (m *Module) ID() string { return providerID }
 func (m *Module) Recognize(candidate pluginapi.SchedulerAuthCandidate) bool {
 	m.mu.Lock()
 	state := m.state
+	inactive := state == nil || len(state.Accounts) == 0
 	_, managed := stateAccountByAuthID(state, candidate.ID)
 	m.mu.Unlock()
+	if inactive {
+		// A disabled module (enabled: false) or one with no configured
+		// accounts manages nothing. Claiming OpenCode Go candidates here
+		// would make Pick fail every OpenCode Go request as "unmanaged", so
+		// leave them to the host's own scheduler instead.
+		return false
+	}
 	if managed {
 		return candidateClaimsOpenCodeGo(candidate) || !candidateClaimsOtherProvider(candidate)
 	}

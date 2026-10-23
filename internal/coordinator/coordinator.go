@@ -16,8 +16,8 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 
-	"github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/internal/providermodule"
-	"github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/internal/securestore"
+	"github.com/TogetherWeOwn/cpa-plugin-subscription-pool/internal/providermodule"
+	"github.com/TogetherWeOwn/cpa-plugin-subscription-pool/internal/securestore"
 )
 
 // PluginID is this plugin's stable, host-facing identifier.
@@ -219,6 +219,9 @@ func (c *Coordinator) pick(req pluginapi.SchedulerPickRequest) (pluginapi.Schedu
 func (c *Coordinator) handleUsage(record pluginapi.UsageRecord) error {
 	providerID := c.registry.providerFor(strings.TrimSpace(record.AuthID))
 	if providerID == "" {
+		providerID = c.usageClaimant(record)
+	}
+	if providerID == "" {
 		return nil
 	}
 	for _, entry := range c.modules {
@@ -227,6 +230,25 @@ func (c *Coordinator) handleUsage(record pluginapi.UsageRecord) error {
 		}
 	}
 	return nil
+}
+
+// usageClaimant returns the ID of the single module that claims record via
+// providermodule.UsageRecognizer, or "" when none or more than one does.
+// Ambiguity is a silent no-op, matching the registry's behavior for usage
+// that belongs to no hosted module.
+func (c *Coordinator) usageClaimant(record pluginapi.UsageRecord) string {
+	claimant := ""
+	for _, entry := range c.modules {
+		recognizer, ok := entry.module.(providermodule.UsageRecognizer)
+		if !ok || !recognizer.RecognizeUsage(record) {
+			continue
+		}
+		if claimant != "" {
+			return ""
+		}
+		claimant = entry.id
+	}
+	return claimant
 }
 
 // managementStatusBody is the redacted JSON served at the coordinator's

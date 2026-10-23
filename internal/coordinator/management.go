@@ -7,7 +7,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 
-	"github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/internal/providermodule"
+	"github.com/TogetherWeOwn/cpa-plugin-subscription-pool/internal/providermodule"
 )
 
 const (
@@ -32,7 +32,7 @@ func (c *Coordinator) managementRoutes() managementRoutesBody {
 			{Method: http.MethodGet, Path: managementStatusPath, Description: "Reports aggregated subscription-pool status across every provider."},
 		},
 		Resources: []managementResource{
-			{Path: resourceStatusPath, Menu: "Subscription Quota", Description: "Shows Z.ai and OpenCode Go quota and account health."},
+			{Path: resourceStatusPath, Menu: "Subscription Quota", Description: "Shows Z.ai, OpenCode Go and synthetic.new quota and account health."},
 		},
 	}
 	for _, entry := range c.modules {

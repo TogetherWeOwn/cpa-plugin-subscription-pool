@@ -10,9 +10,9 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 
-	"github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/internal/coordinator"
-	"github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/internal/providers/opencodego"
-	"github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/internal/providers/zai"
+	"github.com/TogetherWeOwn/cpa-plugin-subscription-pool/internal/coordinator"
+	"github.com/TogetherWeOwn/cpa-plugin-subscription-pool/internal/providers/opencodego"
+	"github.com/TogetherWeOwn/cpa-plugin-subscription-pool/internal/providers/zai"
 )
 
 // writeSrcCPAConfigFixture writes a host CLIProxyAPI config in the
@@ -53,8 +53,8 @@ func TestPluginRegistration(t *testing.T) {
 	// The pinned host rejects plugins that advertise no capability
 	// (internal/pluginhost host.go validPlugin). Every advertised
 	// capability must also have a handler in pluginCall.
-	if registration.Capabilities != (capabilities{Scheduler: true, UsagePlugin: true, ManagementAPI: true}) {
-		t.Fatalf("capabilities = %#v, want scheduler, usage_plugin, and management_api", registration.Capabilities)
+	if registration.Capabilities != (capabilities{Scheduler: true, SchedulerAcrossPriorities: true, UsagePlugin: true, ManagementAPI: true}) {
+		t.Fatalf("capabilities = %#v, want scheduler (across priorities), usage_plugin, and management_api", registration.Capabilities)
 	}
 }
 

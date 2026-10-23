@@ -6,7 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- `providers.synthetic`: a synthetic.new provider module. It manages a paid provider (default `synthetic`) and an infinite-mode provider (default `synthetic-infinite`, the Big plan's free `infinite:small:vision` alias) that share one API key. New requests stay on the paid credential while the plan's weekly credits are under `threshold-percent` (default 95) used and move to infinite mode for aliases both providers serve once the plan is at the threshold, exhausted (429/402), or at `max-concurrent`. Paid-only models are rejected with a retryable HTTP 429 `synthetic_no_capacity` instead of spilling into usage-based billing. Quota comes from the free `GET /v2/quotas` endpoint (never polled with placeholder keys) and the `x-synthetic-quotas` response header, projected forward through the documented 2%-per-202-minutes regeneration. Status reports per-lane health, projected weekly usage, in-flight counts, routing counters and measured output tokens per second and time to first token for paid versus infinite mode. The Subscription Quota page shows synthetic.new lanes.
+- The coordinator dispatches usage for auth IDs no module owns to the single module that claims it through the new optional `providermodule.UsageRecognizer`.
+- The plugin advertises `scheduler_across_priorities` so CLIProxyAPI v8 hosts offer lower-priority fallback credentials to the scheduler. Unrecognized picks still return `Handled:false` and keep the host's priority order.
+
+### Changed
+
+- The repository and Go module are renamed from `cpa-plugin-zai-coding-plan` to `cpa-plugin-subscription-pool` (the plugin ID was already `subscription-pool`). GitHub redirects the old repository, git and release URLs.
+
 ### Fixed
+
+- A host config without any Z.ai credential no longer fails the whole plugin with `provider zai: no complete Z.ai account pairs found`. The zai module is inactive in that case, so the other provider modules register and schedule. A partial or malformed Z.ai configuration still fails closed.
+- An OpenCode Go module with `enabled: false` or no accounts no longer claims OpenCode Go candidates. Before, `Recognize` still claimed them and `Pick` then failed every OpenCode Go request with `opencode_go_unmanaged_candidate`.
 
 - Deployment verification accepts in-process secret intake and the snapshot service's own feed envelope: `deploy/verify-live.sh`, `deploy/verify-live-opencodego.sh`, and `deploy/rollback.sh` take `CLIPROXY_MANAGEMENT_KEY` / `ZAI_CODING_PLAN_KEY` / `OPENCODE_GO_DASHBOARD_API_KEY` from the environment (sourced in-process from the established credential file, never a new file on disk) as an alternative to 0600 key files, with identical one-line/UTF-8 validation and unchanged confidential-value scans. In snapshot-only mode the feed check accepts the existing `{observedAt, records, schemaVersion, staleAfterSeconds}` envelope (records only need to be non-empty objects) while collector-written feeds keep the strict shape checks; the Go `credential_bound` agreement applies to collector feeds only. The runbook no longer extracts keys into temp files, references no absent key paths, and parameterizes the config ownership it verifies (current host `1000:1000`) instead of asserting `root:root`.
 - Deployment verification now accepts the v0.4.5 status shape: `collector-zai.py` and `deploy/verify-live.sh` validate the per-account `identity` pseudonym (64 lowercase hex, unique, confidential-value scanned) and the `cooldown` object (closed reason vocabulary, exact source, active/inactive consistency) from `docs/STATUS-CONTRACT.md`, plus the optional `five_hour_error` diagnostic. Previously both scripts rejected live v0.4.5 status with `secret-like field is forbidden: status.accounts[0].identity` / `unexpected fields`, so no published script could complete acceptance after the v0.4.5 install.
@@ -109,13 +122,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Raw plan keys, authorization headers, request bodies, and management credentials are excluded from persistent state, logs, and status responses; persistence uses only derived account identities and redacted state.
 - State and settings commits are atomic, redacted, and recovered fail-closed after interrupted writes.
 
-[Unreleased]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/compare/v0.4.5...HEAD
-[0.4.5]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.4.5
-[0.4.4]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.4.4
-[0.4.3]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.4.3
-[0.4.2]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.4.2
-[0.4.1]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.4.1
-[0.4.0]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.4.0
-[0.3.0]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.3.0
-[0.2.0]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.2.0
-[0.1.0]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.1.0
+[Unreleased]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/compare/v0.4.5...HEAD
+[0.4.5]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/releases/tag/v0.4.5
+[0.4.4]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/releases/tag/v0.4.4
+[0.4.3]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/releases/tag/v0.4.3
+[0.4.2]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/releases/tag/v0.4.2
+[0.4.1]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/releases/tag/v0.4.1
+[0.4.0]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/releases/tag/v0.4.0
+[0.3.0]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/releases/tag/v0.3.0
+[0.2.0]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/releases/tag/v0.2.0
+[0.1.0]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/releases/tag/v0.1.0

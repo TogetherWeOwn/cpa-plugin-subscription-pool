@@ -1,9 +1,17 @@
-# Z.AI Coding Plan for CLIProxyAPI
+# Subscription Pool for CLIProxyAPI
 
-`zai-coding-plan` is a native Linux/amd64 plugin for [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI). It pairs the Anthropic and OpenAI-compatible credentials backed by each Z.AI Coding Plan key, tracks the plan's five-hour and weekly quota, keeps impaired accounts out of scheduling, and exposes redacted status through CLIProxyAPI's authenticated management API.
+`subscription-pool` is a native Linux/amd64 plugin for [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) that schedules flat-rate subscription credentials so they are used fully without hitting provider limits. One coordinator holds CLIProxyAPI's scheduler slot and hosts one module per provider:
+
+| Module | Provider | What it does |
+|---|---|---|
+| `zai` | Z.AI Coding Plan | pairs each key's Anthropic and OpenAI-compatible credentials, tracks the five-hour and weekly quota, keeps impaired accounts out of scheduling |
+| `opencode-go` | OpenCode Go | quota-aware account pooling from the usage dashboard and observed 429s |
+| `synthetic` | synthetic.new | weekly-credit threshold scheduling, optional concurrency caps, and automatic fallback to the free infinite mode ([details](#synthetic-new)) |
+
+Modules with nothing configured are inactive and leave their providers to CLIProxyAPI's own scheduler. This repository was previously named `cpa-plugin-zai-coding-plan`.
 
 > [!IMPORTANT]
-> Version `0.2.0` is a release candidate until the exact release commit passes CI, immutable-image compatibility, code-review, and security-review gates and the `v0.2.0` tag is published. Do not deploy an untagged artifact as a release.
+> Do not deploy an untagged artifact as a release. A version is releasable only after the exact release commit passes CI, immutable-image compatibility, code-review, and security-review gates and its tag is published.
 
 ## Capabilities
 
@@ -24,6 +32,45 @@ Quota data comes from Z.AI's plan endpoint when available. The token-based credi
 - Go 1.26 and a GCC-compatible C toolchain only when building from source
 
 The supported host range is CLIProxyAPI v7.2.150 through the newest `eceasy/cli-proxy-api` v7.2.x tag that passes the compatibility matrix. CI always tests the v7.2.150 baseline, the operator-recorded deployed image, and the latest published tag. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the pinned SDK, ABI, scheduler-exclusivity, persistence, and threat-model contracts.
+
+## synthetic.new
+
+The `synthetic` module expects two OpenAI-compatible providers that share one synthetic.new API key: the paid provider (spends weekly credits) and the infinite-mode provider at a lower priority. Give an alias to both providers when you want automatic fallback, and a provider-specific alias when you want to choose the lane yourself:
+
+```yaml
+openai-compatibility:
+  - name: synthetic-infinite          # free, slow, Big plan only, streaming required
+    priority: -1
+    base-url: https://api.synthetic.new/openai/v1
+    api-key-entries:
+      - api-key: ${SYNTHETIC_API_KEY}
+    models:
+      - {name: "infinite:small:vision", alias: synthetic-infinite/deepseek-v4.1-flash}
+      - {name: "infinite:small:vision", alias: synthetic/deepseek-v4.1-flash}   # fallback for the paid alias
+  - name: synthetic                   # weekly credits
+    base-url: https://api.synthetic.new/openai/v1
+    api-key-entries:
+      - api-key: ${SYNTHETIC_API_KEY}
+    models:
+      - {name: "hf:deepseek-ai/DeepSeek-V4.1-Flash", alias: synthetic/deepseek-v4.1-flash}
+      - {name: "hf:moonshotai/Kimi-K3", alias: synthetic/kimi-k3}
+plugins:
+  configs:
+    subscription-pool:
+      providers:
+        synthetic:
+          threshold-percent: 95        # stop new paid requests at 95% of the weekly credits
+          quota-refresh-interval: 2m   # GET /v2/quotas is free; "0" uses response headers only
+          max-concurrent: 0            # paid in-flight cap per key; 0 = none (Synthetic publishes no limit)
+          infinite-max-concurrent: 0
+```
+
+Behavior:
+
+- `synthetic/deepseek-v4.1-flash` uses the paid credential while the plan is under the threshold and switches to infinite mode when it is at the threshold, exhausted (429/402), or at `max-concurrent`. Without the plugin, CLIProxyAPI's own priority order gives the same fallback, but only after the paid credential has failed and cooled down.
+- Paid-only models (no infinite alias) get a retryable HTTP 429 `synthetic_no_capacity` at the threshold rather than a request that could be billed as extra usage.
+- Weekly usage comes from `GET /v2/quotas` and the `x-synthetic-quotas` response header and is projected through the documented regeneration (2% every 202 minutes). Placeholder keys (for example `<API KEY PLACEHOLDER>`) are never sent anywhere; the lanes show `health: unbound` until a real key is configured.
+- `GET /v0/management/plugins/subscription-pool/status` -> `providers.synthetic.accounts[].stats` reports measured output tokens per second and time to first token per lane, so infinite-mode speed can be compared with the paid lane.
 
 ## Install
 

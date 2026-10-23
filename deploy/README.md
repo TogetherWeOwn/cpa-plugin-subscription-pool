@@ -119,7 +119,7 @@ The operator card must substitute the deployment's real container/config paths, 
 ```sh
 set -euo pipefail
 umask 077
-repo=/home/ubuntu/cpa-plugin-zai-coding-plan
+repo=/home/ubuntu/cpa-plugin-subscription-pool
 config=/home/ubuntu/stacks/cliproxy/config.yaml
 # Current host: the config stack is uid1000/gid1000 mode 0700, the config file
 # uid1000 mode 0600. No standalone key file exists on this host and none may
@@ -272,7 +272,7 @@ CLIPROXY_SNAPSHOT_ONLY=1 \
 ```sh
 set -euo pipefail
 umask 077
-repo=/home/ubuntu/cpa-plugin-zai-coding-plan
+repo=/home/ubuntu/cpa-plugin-subscription-pool
 config=/home/ubuntu/stacks/cliproxy/config.yaml
 backup=/home/ubuntu/stacks/cliproxy/config.yaml.pre-zai-YYYYMMDDTHHMMSSZ # use the recorded install backup
 test -f "$backup" && test ! -L "$backup"

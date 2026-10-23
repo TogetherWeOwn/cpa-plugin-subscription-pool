@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/internal/securestore"
+	"github.com/TogetherWeOwn/cpa-plugin-subscription-pool/internal/securestore"
 )
 
 const (

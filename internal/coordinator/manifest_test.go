@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/internal/securestore"
+	"github.com/TogetherWeOwn/cpa-plugin-subscription-pool/internal/securestore"
 )
 
 func TestWriteManifestRecordsEveryHostedProvider(t *testing.T) {

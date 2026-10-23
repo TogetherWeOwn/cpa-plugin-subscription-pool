@@ -161,7 +161,12 @@ func discoverAccounts(cpa cpaConfigProjection, cfg pluginConfig) ([]account, err
 	}
 
 	if len(pairs) == 0 {
-		return nil, fmt.Errorf("no complete Z.ai account pairs found")
+		// No Z.ai credential exists in the host config at all: the zai module
+		// is inactive. It owns no auth IDs and recognizes no candidates, so
+		// the other provider modules hosted by the coordinator keep working
+		// for operators who do not (or no longer) hold a Z.ai plan. A partial
+		// or malformed Z.ai configuration still fails closed below.
+		return nil, nil
 	}
 	if err := validatePairs(pairs); err != nil {
 		return nil, err

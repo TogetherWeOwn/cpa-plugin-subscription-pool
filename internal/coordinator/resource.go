@@ -172,6 +172,54 @@ func opencodeDashboardAccounts(raw json.RawMessage) []dashboardAccount {
 	return accounts
 }
 
+type syntheticResourceAccount struct {
+	Name    string                            `json:"name"`
+	Kind    string                            `json:"kind"`
+	Health  string                            `json:"health"`
+	Windows map[string]opencodeResourceWindow `json:"windows"`
+}
+
+type syntheticResourceStatus struct {
+	Accounts []syntheticResourceAccount `json:"accounts"`
+}
+
+// syntheticDashboardAccounts renders the synthetic module's lanes. Its
+// weekly window uses the same shape as OpenCode Go's windows; resets_at is
+// the next 2% regeneration tick rather than a full reset.
+func syntheticDashboardAccounts(raw json.RawMessage) []dashboardAccount {
+	if len(raw) == 0 {
+		return nil
+	}
+	var status syntheticResourceStatus
+	if err := json.Unmarshal(raw, &status); err != nil {
+		return nil
+	}
+	accounts := make([]dashboardAccount, 0, len(status.Accounts))
+	for _, a := range status.Accounts {
+		w, ok := a.Windows["weekly"]
+		window := dashboardWindow{Label: "Weekly credits (next 2% regen)", Known: false, Source: "unknown"}
+		if ok && w.Known {
+			percent := 0.0
+			if w.Utilization != nil {
+				percent = *w.Utilization * 100
+			}
+			if w.Exhausted && percent < 100 {
+				percent = 100
+			}
+			window = dashboardWindow{Label: window.Label, Known: true, Percent: percent, ResetAt: w.ResetAt, Source: opencodeSourceLabel(w)}
+		}
+		if a.Kind == "infinite" {
+			window.Label = "Infinite mode (free, not metered)"
+		}
+		health := a.Health
+		if health == "unbound" {
+			health = "disabled"
+		}
+		accounts = append(accounts, dashboardAccount{Provider: "synthetic.new " + a.Kind, Name: a.Name, Health: health, Windows: []dashboardWindow{window}})
+	}
+	return accounts
+}
+
 func opencodeWindowLabel(kind string) string {
 	switch kind {
 	case "five_hour":
@@ -206,6 +254,7 @@ func renderResourceStatusHTML(status managementStatusBody, now time.Time) string
 	b.WriteString(`</p>`)
 
 	accounts := append(zaiDashboardAccounts(status.Providers["zai"]), opencodeDashboardAccounts(status.Providers["opencode-go"])...)
+	accounts = append(accounts, syntheticDashboardAccounts(status.Providers["synthetic"])...)
 	if len(accounts) == 0 {
 		b.WriteString(`<p class="empty">No accounts are configured yet.</p>`)
 	} else {

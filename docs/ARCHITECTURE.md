@@ -2,7 +2,7 @@
 
 ## Purpose
 
-`subscription-pool` (repository `cpa-plugin-zai-coding-plan`) is a native CLIProxyAPI (CPA) plugin. It is a neutral coordinator that hosts one or more provider modules behind a single CPA scheduler/usage-plugin slot; today it hosts exactly one, `zai`, which makes a pool of Z.ai GLM Coding Plan subscriptions behave as quota-aware logical accounts across CPA's Anthropic and OpenAI-compatible lanes.
+`subscription-pool` (repository `cpa-plugin-subscription-pool`, formerly `cpa-plugin-zai-coding-plan`) is a native CLIProxyAPI (CPA) plugin. It is a neutral coordinator that hosts one or more provider modules behind a single CPA scheduler/usage-plugin slot; today it hosts exactly one, `zai`, which makes a pool of Z.ai GLM Coding Plan subscriptions behave as quota-aware logical accounts across CPA's Anthropic and OpenAI-compatible lanes.
 
 Version 0.1 (zai module):
 
@@ -136,7 +136,7 @@ The coordinator/provider split gives each provider module a compiler-enforced pr
 ├── src/
 │   ├── plugin.go             # envelope/wire-error types, plugin registration metadata
 │   ├── plugin_linux.go       # C ABI init/call/free/shutdown
-│   └── runtime_state.go      # var runtimeState = coordinator.New(zai.New())
+│   └── runtime_state.go      # var runtimeState = coordinator.New(zai, opencodego, synthetic)
 ├── internal/
 │   ├── providermodule/
 │   │   └── interface.go      # Module interface + HostConfig; the coordinator/provider boundary
@@ -157,6 +157,11 @@ The coordinator/provider split gives each provider module a compiler-enforced pr
 │   │   ├── scheduler.go      # degraded-mode healthy selection
 │   │   ├── management.go     # zai's own management routes/handlers
 │   │   └── runtime.go        # zai runtime state machine
+│   ├── providers/opencodego/ # OpenCode Go quota-aware pooling
+│   ├── providers/synthetic/
+│   │   ├── module.go         # paid/infinite lanes, threshold + concurrency scheduling, usage learning, status
+│   │   ├── quota.go          # GET /v2/quotas and x-synthetic-quotas parsing
+│   │   └── config.go         # providers.synthetic schema
 │   ├── securestore/          # generic 0700/0600, symlink-rejecting, atomic-replace storage
 │   └── testfixture/          # shared CPA config fixture builder for tests
 ├── config.example.yaml
@@ -377,7 +382,7 @@ The coordinator, not any individual provider module, holds this single scheduler
 1. **No overlapping ownership.** The dispatch registry (`authID -> providerID`) is rebuilt from every module's `OwnedAuthIDs()` after each successful reconfigure, staged then swapped atomically. If any auth ID is claimed by more than one module, the whole reconfigure fails and the previous registry stays live.
 2. **Zero recognizing modules -> unhandled.** The coordinator calls every module's `Recognize` on the incoming candidates before calling any module's `Pick`. If none recognize any candidate, it returns `Handled:false` so unrelated providers remain untouched.
 3. **More than one recognizing module -> fail closed.** If candidates in one request are recognized by more than one module, the coordinator returns a `coordinator_mixed_provider_pick` error rather than calling any module's `Pick`.
-4. **Usage dispatches strictly by auth ID.** `usage.handle` looks up `record.AuthID` in the registry and never trusts a self-reported provider field on the record; an auth ID the registry does not map to any hosted module is a silent no-op, matching CPA's own behavior for usage records belonging to unrelated providers.
+4. **Usage dispatches by auth ID first.** `usage.handle` looks up `record.AuthID` in the registry, and a registry match always wins over the record's self-reported provider field. Only when no module owns the auth ID does the coordinator ask modules that implement the optional `providermodule.UsageRecognizer`; it dispatches when exactly one claims the record (the synthetic module claims records from its configured provider names, which keeps quota learning working after a key is re-pasted and the host derives a new auth ID). No claimant, or more than one, is a silent no-op, matching CPA's own behavior for usage records belonging to unrelated providers.
 5. **Recognized-but-unmanaged or all-impaired never silently falls back.** Exactly one module recognizes the candidates, and the coordinator propagates that module's own `Pick` result verbatim, including any hard scheduler error such as `zai_unmanaged_candidate` or `zai_no_capacity`.
 6. **Never blend domains.** A structural consequence of invariant 3: no code path can merge two modules' pick results, because a mixed-recognition request never reaches any module's `Pick`.
 
@@ -390,6 +395,25 @@ For the zai module's own `Pick`, called only once the coordinator has establishe
 5. Round-robin among healthy candidates per provider/model, preserving header-derived stickiness when possible (`X-Session-ID`, `Session-Id`, `Session_id`, `X-Client-Request-Id`). Return the selected `AuthID` with `Handled:true`.
 6. If the request contains managed Z.ai candidates but no healthy managed candidate remains, return a scheduler error; `Handled:false` would fall back to built-in selection in v7.2.150 and is forbidden on this path. When at least one of those accounts is only `throttled`, the error is the retryable `zai_rate_limited` with `http_status: 429`, which CPA forwards as a 429 so the client retries in seconds. Otherwise it is the non-retryable `zai_no_capacity` (HTTP 500). The `zai_rate_limited` message must never contain "no healthy managed ... capacity remains": the model router quarantines the whole lane for 15 minutes on that phrase. CPA already retries a request on another credential after an upstream failure, so while any sibling account is healthy the throttled account is simply skipped.
 7. If the request contains no recognized Z.ai candidate, return `Handled:false` (so the coordinator's invariant 2 branch is unreachable here — Recognize already filtered this module out).
+
+### synthetic module
+
+`internal/providers/synthetic` schedules synthetic.new subscription credentials. A synthetic.new plan has a single weekly credit limit that regenerates 2% every 202 minutes (no five-hour window and no lockout); the Big plan adds infinite mode, the model alias `infinite:small:vision`, which never counts against the weekly limit, runs much slower, and requires `stream: true`.
+
+The host config declares two OpenAI-compatible providers with the same key: a paid provider (default name `synthetic`) and an infinite provider (default `synthetic-infinite`) at a lower `priority`. An alias served by both (for example `synthetic/deepseek-v4.1-flash` -> `hf:deepseek-ai/DeepSeek-V4.1-Flash` on the paid provider and `infinite:small:vision` on the infinite one) gets automatic fallback:
+
+1. Lanes are discovered from the host's `openai-compatibility` entries on every reconfigure, with auth IDs derived exactly as the host derives them. Candidates are also recognized by `compat_name`/provider key, so a re-keyed credential still schedules correctly.
+2. A paid lane is available while its account's weekly usage, projected forward through the regeneration ticks that have passed since the last reading, is below `threshold-percent` (default 95), the account is not in a learned 429/402 exhaustion window, the lane is not resting after a rate-limit 429, and it is under `max-concurrent` (0 = no local cap).
+3. `Pick` returns a paid lane (round-robin) when one is available; otherwise an available infinite lane (counted as a fallback); otherwise a retryable `synthetic_no_capacity` / `synthetic_infinite_busy` error with HTTP 429. It never lets a request reach a paid credential that is at the threshold, so a plan with extra usage enabled does not spill into usage-based billing. A candidate set that also contains another provider's credentials makes the module decline (`Handled:false`).
+4. Quota comes from `GET <origin>/v2/quotas` (free; polled every `quota-refresh-interval`, default 2m, only for real keys, never for placeholder keys such as `<API KEY PLACEHOLDER>`) and from the `x-synthetic-quotas` header on every response. A paid 429 or 402 parks the account until the reported `nextRegenAt` or `failure-cooldown`; a paid 429 whose header still shows credits rests only that lane for `infinite-cooldown`; an infinite-mode 429 rests the infinite lane for `infinite-cooldown`.
+5. In-flight slots are released by the matching usage record and expire after `in-flight-ttl`, so a lost record cannot wedge a capped lane.
+6. Status reports per-lane health, the projected weekly usage, the next regeneration tick, in-flight counts, routing counters, and measured throughput (output tokens per second excluding time to first token, plus mean time to first token) so paid and infinite speed can be compared directly.
+
+The plugin registers `scheduler_across_priorities` so CLIProxyAPI v8 hosts offer both priority tiers to the scheduler; without it the infinite lane would be invisible until the paid credential was already cooling down. Picks no module recognizes still return `Handled:false`, and the host's selector then applies its normal priority order.
+
+### Inactive modules
+
+A module with nothing to manage claims nothing: the zai module with no Z.ai credential in the host config, the OpenCode Go module with `enabled: false` or no accounts, and the synthetic module with no matching providers or `enabled: false` all return `Recognize == false` and own no auth IDs. Their providers' traffic goes to the host's own scheduler, and a missing Z.ai plan no longer prevents the plugin from registering.
 
 The scheduler performs no disk, network, or host callback while holding its lock. Contract tests assert the all-impaired module error propagates through the coordinator and `pluginhost.PickAuth` with `handled=true` and cannot fall back to a known-bad credential.
 
