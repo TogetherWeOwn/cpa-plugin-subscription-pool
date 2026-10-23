@@ -333,6 +333,68 @@ func TestLearnedCredentialBindsToSoleAccount(t *testing.T) {
 	}
 }
 
+// twoAccountCompats configures two synthetic.new keys on both the paid and the
+// infinite provider, so a learned paid credential has no sole account to bind.
+func twoAccountCompats() []providermodule.OpenAICompatibility {
+	keys := []providermodule.OpenAICompatibilityAPIKey{{APIKey: testKey}, {APIKey: testKey + "-second"}}
+	return []providermodule.OpenAICompatibility{
+		{Name: "synthetic-infinite", BaseURL: testBase, APIKeyEntries: keys},
+		{Name: "synthetic", BaseURL: testBase, APIKeyEntries: keys},
+	}
+}
+
+func discoveredLanes(t *testing.T, m *Module, kind laneKind) []string {
+	t.Helper()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var ids []string
+	for id, item := range m.lanes {
+		if !item.learned && item.Kind == kind {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) != 2 {
+		t.Fatalf("discovered %s lanes = %v, want 2", kind, ids)
+	}
+	return ids
+}
+
+func TestUnboundLearnedPaidCredentialFailsClosed(t *testing.T) {
+	m, _ := newTestModule(t, "{}", twoAccountCompats()...)
+	for _, id := range discoveredLanes(t, m, kindPaid) {
+		_ = m.HandleUsage(context.Background(), usage(id, http.StatusOK, quotaHeaderValue(0, testStart.Add(time.Hour))))
+	}
+	infinite := discoveredLanes(t, m, kindInfinite)
+	rekeyed := candidate("openai-compatibility:synthetic:bbbbbbbbbbbb", "synthetic")
+
+	// Both known paid accounts are at 100% used, and the re-keyed paid
+	// credential cannot be tied to either of them: it must not be admitted.
+	got := mustPick(t, m, pickReq(true, rekeyed, candidate(infinite[0], "synthetic-infinite")))
+	if got != infinite[0] {
+		t.Fatalf("pick = %s, want infinite %s (unbound learned paid lane must fail closed)", got, infinite[0])
+	}
+	if _, err := m.Pick(context.Background(), pickReq(true, rekeyed)); err == nil || !strings.Contains(err.Error(), "not bound to a known synthetic.new account") {
+		t.Fatalf("paid-only pick error = %v, want synthetic_no_capacity naming the unbound credential", err)
+	}
+	for _, item := range statusOf(t, m)["accounts"].([]any) {
+		lane := item.(map[string]any)
+		if lane["learned"] == true && (lane["health"] != "unbound" || !strings.Contains(lane["health_reason"].(string), "not bound")) {
+			t.Fatalf("learned lane status = %v", lane)
+		}
+	}
+}
+
+func TestUnboundLearnedPaidCredentialFailsClosedEvenWithCreditsLeft(t *testing.T) {
+	m, _ := newTestModule(t, "{}", twoAccountCompats()...)
+	rekeyed := candidate("openai-compatibility:synthetic:cccccccccccc", "synthetic")
+	known := discoveredLanes(t, m, kindPaid)
+	// A known paid credential still schedules; only the unbound one is refused.
+	got := mustPick(t, m, pickReq(true, rekeyed, candidate(known[0], "synthetic")))
+	if got != known[0] {
+		t.Fatalf("pick = %s, want bound paid credential %s", got, known[0])
+	}
+}
+
 func TestNonStreamInfinitePicksAreCounted(t *testing.T) {
 	m, _ := newTestModule(t, "{}")
 	_ = m.HandleUsage(context.Background(), usage(paidAuthID, http.StatusOK, quotaHeaderValue(0, testStart.Add(time.Hour))))

@@ -62,19 +62,21 @@ is not root, and `CLIPROXY_CONTAINER` so the service reload becomes
 `docker restart`. The usage-output cleanup targets the fixed feed path only
 when the usage directory exists.
 
-Status-shape note: v0.4.5 emits `identity` and `cooldown` on every Z.ai
+Status-shape note: v0.4.5 and later emit `identity` and `cooldown` on every Z.ai
 account (see `docs/STATUS-CONTRACT.md`) plus an optional `five_hour_error`.
 The collector and both live verifiers accept exactly that shape with strict
 64-hex identity, closed-vocabulary cooldown, and unchanged secret scans; older
 script copies reject live v0.4.5 status and must not be used for acceptance.
 
-Compatibility note: v0.4.5 builds against SDK v7.2.67 (ABI 1, schema 1),
-identical to the live v0.4.4, with no new RPC surface; the v0.4.4 library is
-loaded and serving on the current patched host image today. Release CI passed
-the exact-image matrix on stock v7.2.151 (deployed evidence), v8.0.13
-(latest), and v7.2.67 (baseline). The patched
-`v8.0.12-tog.3-musereplay` host image itself was never in CI; that is an
-evidence gap, not proof of incompatibility. The bounded host preflight is the
+Compatibility note: v0.5.0 builds against SDK v7.2.154 (ABI 1, schema 5).
+Hosts that accept only schema 1, including the old v7.2.67 baseline, cannot
+load it; do not install v0.5.0 on them. Release CI runs the exact-image host
+matrix on the deployed evidence image (stock v7.2.151), the latest stock image,
+and the v7.2.150 baseline (`.github/host-images.json`). The production host
+runs the patched `v8.0.38-tog.1` image, which is not in CI; that is an evidence
+gap, covered by a pre-release smoke on a throwaway instance of that exact image
+(separate port, config copy, API-key credentials only): the plugin registers
+and its authenticated status answers. The bounded host preflight is the
 management plugin-list registration check plus authenticated status on the new
 library, with no inference probe.
 

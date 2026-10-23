@@ -481,9 +481,21 @@ func (m *Module) soleAccountForProviderLocked(provider string) string {
 	return found
 }
 
+// unboundPaidReason explains why a learned paid credential is refused: its
+// spend cannot be checked against any account's weekly credits.
+const unboundPaidReason = "credential not bound to a known synthetic.new account (re-keyed or added after the last reconfigure), so its weekly credits cannot be checked"
+
 func (m *Module) paidAvailableLocked(item *lane, now time.Time) (bool, string) {
 	if busy, why := laneBusy(item, now); busy {
 		return false, why
+	}
+	if item.learned && m.accounts[item.Account] == nil {
+		// Fail closed: a learned paid credential that could not be bound to
+		// exactly one known account (two or more accounts, or none) has no
+		// quota to check, and admitting it could spill into usage-based
+		// billing past the threshold. Infinite mode, or a 429-coded
+		// rejection, takes the request until the next Reconfigure binds it.
+		return false, unboundPaidReason
 	}
 	if acct := m.accounts[item.Account]; acct != nil {
 		if acct.exhaustedUntil.After(now) {
@@ -902,7 +914,14 @@ func (m *Module) Status(context.Context) (json.RawMessage, error) {
 		}
 		if !bound {
 			entry.Health = "unbound"
-			entry.HealthReason = "no API key yet (placeholder): paste the synthetic.new key in the CLIProxy panel"
+			switch {
+			case item.learned && item.Kind == kindPaid:
+				entry.HealthReason = unboundPaidReason
+			case item.learned:
+				entry.HealthReason = "credential not bound to a known synthetic.new account (re-keyed or added after the last reconfigure)"
+			default:
+				entry.HealthReason = "no API key yet (placeholder): paste the synthetic.new key in the CLIProxy panel"
+			}
 		}
 		entry.Stats = summarizeStats(item.stats)
 		body.Accounts = append(body.Accounts, entry)

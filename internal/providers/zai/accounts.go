@@ -165,7 +165,12 @@ func discoverAccounts(cpa cpaConfigProjection, cfg pluginConfig) ([]account, err
 		// is inactive. It owns no auth IDs and recognizes no candidates, so
 		// the other provider modules hosted by the coordinator keep working
 		// for operators who do not (or no longer) hold a Z.ai plan. A partial
-		// or malformed Z.ai configuration still fails closed below.
+		// or malformed Z.ai configuration still fails closed below, and so
+		// does an accounts override: it names an account the operator
+		// expects, so silently dropping it would hide a lost credential.
+		if len(cfg.Accounts) > 0 {
+			return nil, fmt.Errorf("accounts[0]: key-suffix matches no account (the host config has no Z.ai credential; remove providers.zai.accounts if the Z.ai plan is gone)")
+		}
 		return nil, nil
 	}
 	if err := validatePairs(pairs); err != nil {

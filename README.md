@@ -6,7 +6,7 @@
 |---|---|---|
 | `zai` | Z.AI Coding Plan | pairs each key's Anthropic and OpenAI-compatible credentials, tracks the five-hour and weekly quota, keeps impaired accounts out of scheduling |
 | `opencode-go` | OpenCode Go | quota-aware account pooling from the usage dashboard and observed 429s |
-| `synthetic` | synthetic.new | weekly-credit threshold scheduling, optional concurrency caps, and automatic fallback to the free infinite mode ([details](#synthetic-new)) |
+| `synthetic` | synthetic.new | weekly-credit threshold scheduling, optional concurrency caps, and automatic fallback to the free infinite mode ([details](#syntheticnew)) |
 
 Modules with nothing configured are inactive and leave their providers to CLIProxyAPI's own scheduler. This repository was previously named `cpa-plugin-zai-coding-plan`.
 
