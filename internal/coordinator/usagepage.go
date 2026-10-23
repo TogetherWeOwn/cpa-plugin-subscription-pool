@@ -26,7 +26,7 @@ var usagePageTemplate string
 const (
 	resourceUsageDataPath   = "/usage.json"
 	managementUsagePath     = "/v0/management/plugins/" + PluginID + "/usage"
-	usagePageMenu           = "Usage & Quota"
+	usagePageMenu           = "Usage and Quota"
 	usagePageInitialMarker  = "__SP_INITIAL_DATA__"
 	usagePageNonceMarker    = "__SP_NONCE__"
 	syntheticRegenInterval  = 202 * time.Minute

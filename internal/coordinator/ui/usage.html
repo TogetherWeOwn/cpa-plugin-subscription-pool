@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="color-scheme" content="light dark">
-<title>Subscription Pool · Usage &amp; Quota</title>
+<title>Subscription Pool · Usage and Quota</title>
 <style>
 /* Design tokens follow the CLIProxyAPI Management Center (MIT, Router-For.ME):
    warm-grey paper surfaces, green/red data colours, mono telemetry. */
@@ -39,7 +39,7 @@
 *{box-sizing:border-box}
 html,body{margin:0;background:var(--bg-secondary);color:var(--text-primary);font:14px/1.5 var(--font);-webkit-font-smoothing:antialiased}
 .mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
-.page{position:relative;max-width:1180px;margin:0 auto;padding:40px 44px 64px;overflow:hidden}
+.page{position:relative;max-width:1180px;margin:0 auto;padding:88px 44px 64px;overflow:hidden}
 .ambient{position:absolute;inset:0 0 auto 0;height:560px;pointer-events:none;z-index:0}
 .ambient .wash{position:absolute;inset:0;background:radial-gradient(60% 70% at 70% 20%,color-mix(in srgb,var(--viz-success) 10%,transparent),transparent 70%)}
 .ambient .grid{position:absolute;inset:0;background-image:linear-gradient(color-mix(in srgb,var(--border-color) 45%,transparent) 1px,transparent 1px),linear-gradient(90deg,color-mix(in srgb,var(--border-color) 45%,transparent) 1px,transparent 1px);background-size:56px 56px;mask-image:radial-gradient(70% 80% at 70% 10%,#000 10%,transparent 70%);opacity:.5}
@@ -520,7 +520,7 @@ ul.notes{margin:0;padding-left:18px;font-size:12px;color:var(--text-tertiary)}
     var accent = d.status !== 'registered' ? 'var(--viz-failure)' : tot.requests === 0 ? 'var(--text-quaternary)' : t === 'good' ? 'var(--viz-success)' : t === 'warning' ? 'var(--amber-color)' : 'var(--viz-failure)';
     var h = $('verdict'); clear(h); h.appendChild(document.createTextNode(verdict));
     var dot = el('span', 'hero-period' + (tot.requests > 0 ? ' live' : ''), '.'); dot.style.color = accent; h.appendChild(dot);
-    var provs = d.providers.filter(function (p) { return p.status !== 'inactive'; }).map(function (p) { return p.label; });
+    var provs = d.providers.filter(function (p) { return p.accounts > 0; }).map(function (p) { return p.label; });
     $('hero-meta').textContent = ['subscription-pool v' + String(d.version || '').replace(/^v/i, ''), provs.length ? provs.join(' · ') : 'no active provider', 'updated ' + clock(new Date(d.generated_at))].join('  ·  ');
     countUp($('hero-figure'), tot.requests);
     var sw = stepWords(d.usage.step_seconds);

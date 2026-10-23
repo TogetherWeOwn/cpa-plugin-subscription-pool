@@ -291,6 +291,11 @@ func TestUsageRoutesAreRegistered(t *testing.T) {
 	if !usageRoute {
 		t.Fatalf("routes = %+v, want GET %s", routes.Routes, managementUsagePath)
 	}
+	// The host HTML-escapes plugin menu labels in its plugin list, so a label
+	// with &, <, >, ' or " would show its entity text in the sidebar.
+	if strings.ContainsAny(usagePageMenu, "&<>'\"") {
+		t.Fatalf("menu label %q contains characters the host escapes", usagePageMenu)
+	}
 	if len(routes.Resources) != 2 || routes.Resources[0].Path != resourceStatusPath || routes.Resources[0].Menu != usagePageMenu ||
 		routes.Resources[1].Path != resourceUsageDataPath || routes.Resources[1].Menu != "" {
 		t.Fatalf("resources = %+v", routes.Resources)

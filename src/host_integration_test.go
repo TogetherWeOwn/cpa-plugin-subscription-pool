@@ -35,7 +35,7 @@ const (
 	managementStatusPath  = "/v0/management/plugins/" + pluginID + "/status"
 	resourceStatusPath    = "/status"
 	resourceUsageDataPath = "/usage.json"
-	usagePageMenu         = "Usage & Quota"
+	usagePageMenu         = "Usage and Quota"
 )
 
 // ownedZaiAuthIDs computes the exact auth IDs the zai module will assign for

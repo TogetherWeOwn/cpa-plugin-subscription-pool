@@ -174,9 +174,9 @@ A custom plan sets `plan: custom`, `five-hour-credits`, and `weekly-credits`. Su
 
 Local state and non-secret settings are stored atomically under `<auth-dir>/zai-coding-plan/`. The directory is mode `0700`, files are mode `0600`, and provider keys are never persisted.
 
-## Usage & Quota page
+## Usage and Quota page
 
-The plugin adds a **Usage & Quota** entry to the Management Center's plugin menu (`/v0/resource/plugins/subscription-pool/status`). It uses the same design as the official Dashboard and Quota Management pages:
+The plugin adds a **Usage and Quota** entry to the Management Center's plugin menu (`/v0/resource/plugins/subscription-pool/status`). It uses the same design as the official Dashboard and Quota Management pages:
 
 - a headline verdict, requests handled with the success/failure split, and a traffic wave;
 - provider tabs (All, Z.ai, OpenCode Go, synthetic.new), time ranges (1 h, 6 h, 24 h, 7 d), search, and a model filter;
