@@ -349,3 +349,17 @@ func TestUsageLedgerPersistsAcrossRestart(t *testing.T) {
 		t.Fatalf("restored usage = %+v, ledger %+v", data.Usage.Totals, data.Ledger)
 	}
 }
+
+func TestUsageAfterShutdownStartsNoBackgroundSave(t *testing.T) {
+	dir := t.TempDir()
+	c := pageCoordinator(t)
+	c.attachLedgerStore(dir)
+	if err := c.Shutdown(); err != nil {
+		t.Fatal(err)
+	}
+	_ = c.handleUsage(usageRecord(hiddenPaidLaneRef, "synthetic/glm-5.3", pageNow, 10, 0))
+	c.ledgerStore.wg.Wait()
+	if _, err := os.Stat(filepath.Join(dir, ledgerSubdir, ledgerStateName)); !os.IsNotExist(err) {
+		t.Fatalf("a usage record after shutdown wrote the ledger (stat err = %v)", err)
+	}
+}

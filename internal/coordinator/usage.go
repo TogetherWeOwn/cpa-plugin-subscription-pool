@@ -83,6 +83,13 @@ func (c *Coordinator) recordUsage(entry moduleEntry, record pluginapi.UsageRecor
 	}
 	now := c.runtimeNow()
 	c.ledger.Record(entry.id, account, record, now)
+	c.mu.RLock()
+	stopped := c.stopped
+	c.mu.RUnlock()
+	if stopped {
+		// Shutdown already flushed; never start a background write after it.
+		return
+	}
 	c.maybeSaveLedger(now, false)
 }
 
