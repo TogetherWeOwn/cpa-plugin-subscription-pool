@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-23
+
 ### Added
 
 - Usage & Quota page: the plugin's Management Center page is rebuilt to the official Dashboard and Quota Management design. It adds time ranges (1 h, 6 h, 24 h, 7 d), provider tabs, search and a model filter; success-rate, token, account and speed tiles; a throughput chart with a data table; per-provider, per-account and per-model usage (requests, error rate, 429s, tokens, latency, time to first token, tokens per second); quota cards with remaining-percent bars, reset times and countdowns; a two-week quota-window timeline; and a synthetic.new panel with the weekly-credit refill schedule, infinite-mode usage and speed, and per-lane concurrency. The menu entry is now **Usage & Quota**.
@@ -136,7 +138,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Raw plan keys, authorization headers, request bodies, and management credentials are excluded from persistent state, logs, and status responses; persistence uses only derived account identities and redacted state.
 - State and settings commits are atomic, redacted, and recovered fail-closed after interrupted writes.
 
-[Unreleased]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/releases/tag/v0.6.0
 [0.5.0]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/releases/tag/v0.5.0
 [0.4.5]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/releases/tag/v0.4.5
 [0.4.4]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/releases/tag/v0.4.4
