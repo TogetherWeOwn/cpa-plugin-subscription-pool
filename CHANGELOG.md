@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-23
+
+### Added
+
+- Usage and Quota page: the plugin's Management Center page is rebuilt to the official Dashboard and Quota Management design. It adds time ranges (1 h, 6 h, 24 h, 7 d), provider tabs, search and a model filter; success-rate, token, account and speed tiles; a throughput chart with a data table; per-provider, per-account and per-model usage (requests, error rate, 429s, tokens, latency, time to first token, tokens per second); quota cards with remaining-percent bars, reset times and countdowns; a two-week quota-window timeline; and a synthetic.new panel with the weekly-credit refill schedule, infinite-mode usage and speed, and per-lane concurrency. The menu entry is now **Usage and Quota**.
+- `internal/usage`: a bounded usage ledger (5-minute buckets for 48 h, 1-hour buckets for 8 days, 100 rows per bucket plus one reserved overflow row per provider) fed by every usage record a hosted module accepts, saved every 5 minutes and on shutdown to `<auth-dir>/subscription-pool/usage/ledger.state` in a compact encoding kept under 6 MiB. The size budget counts the exact JSON bytes (escaped labels included) and keeps the newest buckets of both tiers first; when older history has to be dropped, `usage.complete_from` says from when the shown range is complete. A failed save stays pending and is retried; a saved ledger that fails to load is never overwritten (the load is retried on every reconfigure), and a runtime `auth-dir` change applies to the ledger at the next restart; a restored bucket keeps every row it saved.
+- `GET /v0/management/plugins/subscription-pool/usage` and the resource route `usage.json` serve the page's redacted data: health reasons, quota sources and history-save failures (`ledger.persist_error`) as closed codes, no upstream error text, validation error or file path. The authenticated route adds `ledger.persist_error_detail`.
+- `providermodule.UsageAttributor` lets a module name the account a usage record belongs to; the zai, OpenCode Go and synthetic modules implement it.
+- synthetic status reports `peak_in_flight` and `peak_in_flight_at` per lane.
+
+### Changed
+
+- synthetic lane names are ordinals per provider (`synthetic#1`, `synthetic-infinite#2`), never derived from a credential, and they stick to their credential: the auth ID to ordinal assignment is kept server-side in `<auth-dir>/subscription-pool/providers/synthetic/lane-labels.state`, so reordering api-key entries, live or across a restart, no longer moves a name, or the usage history keyed by it, to another key. A new credential takes its provider's lowest free ordinal (a rotated key inherits the replaced key's name). Learned lanes are `<provider>#learned-<n>`. A label-store failure is soft and shows as `lane_labels_error` on the authenticated status; an unreadable label file is never overwritten.
+- Shutdown waits for usage records being handled before the final ledger save.
+- The usage page runs one inline script under a per-response CSP nonce and fetches `usage.json` from its own origin (`connect-src 'self'`); it still has no `frame-ancestors`, so cross-origin Management Center frames keep working.
+
 ## [0.5.0] - 2026-10-23
 
 ### Added
@@ -124,7 +140,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Raw plan keys, authorization headers, request bodies, and management credentials are excluded from persistent state, logs, and status responses; persistence uses only derived account identities and redacted state.
 - State and settings commits are atomic, redacted, and recovered fail-closed after interrupted writes.
 
-[Unreleased]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/releases/tag/v0.6.0
 [0.5.0]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/releases/tag/v0.5.0
 [0.4.5]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/releases/tag/v0.4.5
 [0.4.4]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/releases/tag/v0.4.4

@@ -115,6 +115,14 @@ type UsageRecognizer interface {
 	RecognizeUsage(record pluginapi.UsageRecord) bool
 }
 
+// UsageAttributor is optionally implemented by a Module that can name the
+// account a usage record it accepted belongs to. The coordinator calls it
+// after HandleUsage, for its usage ledger only. The returned name must be a
+// display name (never a key, key fragment or auth ID); "" means unknown.
+type UsageAttributor interface {
+	UsageAccount(record pluginapi.UsageRecord) string
+}
+
 // WireError is the coded error shape carried across the CGo ABI boundary.
 // Both provider modules and the coordinator produce errors satisfying Coded
 // so the ABI glue in src/ can build byte-identical error envelopes

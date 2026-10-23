@@ -707,3 +707,16 @@ func TestDisabledModuleDoesNotClaimOpenCodeGoTraffic(t *testing.T) {
 		t.Fatal("disabled OpenCode Go module recognized its own provider's candidate; Pick would then fail every request as unmanaged")
 	}
 }
+
+func TestUsageAccountNamesTheOwningAccount(t *testing.T) {
+	module := configuredModule(t, 97)
+	if got := module.UsageAccount(pluginapi.UsageRecord{AuthID: "go-b-1"}); got != "go-b" {
+		t.Fatalf("UsageAccount(go-b-1) = %q, want go-b", got)
+	}
+	if got := module.UsageAccount(pluginapi.UsageRecord{AuthID: "other"}); got != "" {
+		t.Fatalf("UsageAccount(other) = %q, want empty", got)
+	}
+	if got := NewModule().UsageAccount(pluginapi.UsageRecord{AuthID: "go-b-1"}); got != "" {
+		t.Fatalf("UsageAccount on an unconfigured module = %q, want empty", got)
+	}
+}

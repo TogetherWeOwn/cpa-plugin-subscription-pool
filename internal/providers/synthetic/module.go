@@ -52,7 +52,9 @@ const (
 )
 
 // lane is one host credential: one api-key entry of one paid or infinite
-// openai-compatibility provider.
+// openai-compatibility provider. Name is public ("synthetic#1", see
+// labels.go); AuthID and Account are credential-derived and stay on the
+// authenticated status route.
 type lane struct {
 	Name     string
 	Provider string
@@ -60,11 +62,15 @@ type lane struct {
 	AuthID   string
 	Account  string
 	learned  bool
+	ordinal  int
 
 	inFlight  []time.Time
 	busyUntil time.Time
 	busyWhy   string
 	stats     laneStats
+
+	peakInFlight int
+	peakAt       time.Time
 }
 
 type laneStats struct {
@@ -129,6 +135,17 @@ type Module struct {
 	configured  bool
 	closed      bool
 
+	// labelsMu serializes lane naming and its persistence across
+	// Reconfigure calls; it is never taken while holding mu.
+	labelsMu     sync.Mutex
+	labels       map[string]laneLabel
+	labelsDir    string
+	labelsLoaded bool
+	labelsSaved  bool
+	// labelsErr (under mu) is the last lane-labels failure, for status.
+	labelsErr  string
+	learnedSeq map[string]int
+
 	now        func() time.Time
 	httpClient httpDoer
 
@@ -142,6 +159,7 @@ type Module struct {
 var (
 	_ providermodule.Module          = (*Module)(nil)
 	_ providermodule.UsageRecognizer = (*Module)(nil)
+	_ providermodule.UsageAttributor = (*Module)(nil)
 )
 
 // NewModule constructs the synthetic module with a real clock and HTTP client.
@@ -222,19 +240,32 @@ func (m *Module) Reconfigure(_ context.Context, host providermodule.HostConfig, 
 	}
 	paidSet := toSet(cfg.PaidProviders)
 	infiniteSet := toSet(cfg.InfiniteProviders)
-	lanes, accounts := discoverLanes(cfg, host.OpenAICompatibility, paidSet, infiniteSet)
+	lanes, order, accounts := discoverLanes(cfg, host.OpenAICompatibility, paidSet, infiniteSet)
+
+	m.labelsMu.Lock()
+	defer m.labelsMu.Unlock()
+	m.mu.Lock()
+	closed := m.closed
+	m.mu.Unlock()
+	if closed {
+		return fmt.Errorf("synthetic_closed: module is closed")
+	}
+	labelsErr := m.nameLanesLocked(host.AuthDir, order, lanes)
 
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
 		return fmt.Errorf("synthetic_closed: module is closed")
 	}
+	m.labelsErr = labelsErr
 	for id, next := range lanes {
 		if previous := m.lanes[id]; previous != nil && !previous.learned && previous.Kind == next.Kind {
 			next.inFlight = previous.inFlight
 			next.busyUntil = previous.busyUntil
 			next.busyWhy = previous.busyWhy
 			next.stats = previous.stats
+			next.peakInFlight = previous.peakInFlight
+			next.peakAt = previous.peakAt
 		}
 	}
 	for fingerprint, next := range accounts {
@@ -283,12 +314,13 @@ func (m *Module) Reconfigure(_ context.Context, host providermodule.HostConfig, 
 // "openai-compatibility:<lower name>:" + sha256(kind \0 key \0 base \0 proxy)[:12]
 // with a -N suffix for duplicates. The module also recognizes candidates by
 // provider name, so a host whose ID derivation differs still schedules
-// correctly; only usage attribution falls back to provider matching.
-func discoverLanes(cfg moduleConfig, compats []providermodule.OpenAICompatibility, paidSet, infiniteSet map[string]struct{}) (map[string]*lane, map[string]*account) {
+// correctly; only usage attribution falls back to provider matching. order
+// lists the auth IDs in config order; lanes are named by assignLaneNames.
+func discoverLanes(cfg moduleConfig, compats []providermodule.OpenAICompatibility, paidSet, infiniteSet map[string]struct{}) (map[string]*lane, []string, map[string]*account) {
 	lanes := make(map[string]*lane)
+	var order []string
 	accounts := make(map[string]*account)
 	idGen := newStableIDGenerator()
-	counters := make(map[string]int)
 	for _, compat := range compats {
 		if compat.Disabled {
 			continue
@@ -316,9 +348,7 @@ func discoverLanes(cfg moduleConfig, compats []providermodule.OpenAICompatibilit
 			} else {
 				id = idGen.next(idKind, key, base, strings.TrimSpace(entry.ProxyURL))
 			}
-			counters[name]++
 			item := &lane{
-				Name:     fmt.Sprintf("%s#%d", name, counters[name]),
 				Provider: name,
 				Kind:     kind,
 				AuthID:   id,
@@ -336,9 +366,10 @@ func discoverLanes(cfg moduleConfig, compats []providermodule.OpenAICompatibilit
 				}
 			}
 			lanes[id] = item
+			order = append(order, id)
 		}
 	}
-	return lanes, accounts
+	return lanes, order, accounts
 }
 
 func (m *Module) OwnedAuthIDs(context.Context) []string {
@@ -457,7 +488,12 @@ func (m *Module) laneForCandidateLocked(candidate pluginapi.SchedulerAuthCandida
 			break
 		}
 	}
-	item := &lane{Name: provider + "#learned-" + shortHash(id), Provider: provider, Kind: kind, AuthID: id, learned: true}
+	if m.learnedSeq == nil {
+		m.learnedSeq = make(map[string]int)
+	}
+	m.learnedSeq[provider]++
+	ordinal := m.learnedSeq[provider]
+	item := &lane{Name: provider + "#learned-" + strconv.Itoa(ordinal), Provider: provider, Kind: kind, AuthID: id, learned: true, ordinal: ordinal}
 	// A learned credential most likely belongs to the only account its
 	// provider uses; bind it so quota still protects it.
 	if only := m.soleAccountForProviderLocked(provider); only != "" {
@@ -531,6 +567,10 @@ func laneBusy(item *lane, now time.Time) (bool, string) {
 func (m *Module) admitLocked(item *lane, now time.Time) {
 	m.pruneInFlightLocked(item, now)
 	item.inFlight = append(item.inFlight, now)
+	if len(item.inFlight) > item.peakInFlight {
+		item.peakInFlight = len(item.inFlight)
+		item.peakAt = now
+	}
 }
 
 func (m *Module) inFlightLocked(item *lane, now time.Time) int {
@@ -566,6 +606,19 @@ func (m *Module) RecognizeUsage(record pluginapi.UsageRecord) bool {
 	}
 	_, ok := m.kindOfProviderLocked(record.Provider)
 	return ok
+}
+
+// UsageAccount names the lane a usage record belongs to (for example
+// "synthetic#1" or "synthetic-infinite#2") for the coordinator's usage
+// ledger. HandleUsage has already created a learned lane for an unknown auth
+// ID of a configured provider, so every accepted record resolves.
+func (m *Module) UsageAccount(record pluginapi.UsageRecord) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if item := m.lanes[strings.TrimSpace(record.AuthID)]; item != nil {
+		return item.Name
+	}
+	return ""
 }
 
 // HandleUsage releases the in-flight slot, records throughput, and learns
@@ -818,6 +871,8 @@ func (m *Module) Status(context.Context) (json.RawMessage, error) {
 		Windows          map[string]statusWindow `json:"windows"`
 		NextRegenPercent *float64                `json:"next_regen_percent,omitempty"`
 		InFlight         int                     `json:"in_flight"`
+		PeakInFlight     int                     `json:"peak_in_flight"`
+		PeakInFlightAt   *time.Time              `json:"peak_in_flight_at,omitempty"`
 		MaxConcurrent    int                     `json:"max_concurrent"`
 		Stats            statsView               `json:"stats"`
 		LastPollError    string                  `json:"last_poll_error,omitempty"`
@@ -840,6 +895,7 @@ func (m *Module) Status(context.Context) (json.RawMessage, error) {
 		PaidProviders     []string        `json:"paid_providers"`
 		InfiniteProviders []string        `json:"infinite_providers"`
 		CredentialBound   bool            `json:"credential_bound"`
+		LaneLabelsError   string          `json:"lane_labels_error,omitempty"`
 		Accounts          []statusAccount `json:"accounts"`
 		Routing           statusRouting   `json:"routing"`
 		ObservationGaps   []string        `json:"observation_gaps"`
@@ -847,6 +903,7 @@ func (m *Module) Status(context.Context) (json.RawMessage, error) {
 		Provider:          providerID,
 		Status:            "registered",
 		ValidationError:   m.lastErr,
+		LaneLabelsError:   m.labelsErr,
 		Enabled:           m.cfg.Enabled,
 		ThresholdPercent:  m.cfg.ThresholdPercent,
 		PaidProviders:     append([]string{}, m.cfg.PaidProviders...),
@@ -869,8 +926,15 @@ func (m *Module) Status(context.Context) (json.RawMessage, error) {
 	}
 	sort.Slice(ids, func(i, j int) bool {
 		left, right := m.lanes[ids[i]], m.lanes[ids[j]]
-		if left.Kind != right.Kind {
+		switch {
+		case left.Kind != right.Kind:
 			return left.Kind == kindPaid
+		case left.Provider != right.Provider:
+			return left.Provider < right.Provider
+		case left.learned != right.learned:
+			return !left.learned
+		case left.ordinal != right.ordinal:
+			return left.ordinal < right.ordinal
 		}
 		return left.Name < right.Name
 	})
@@ -885,6 +949,11 @@ func (m *Module) Status(context.Context) (json.RawMessage, error) {
 			Name: item.Name, Provider: item.Provider, Kind: item.Kind, AuthID: item.AuthID,
 			Account: item.Account, Learned: item.learned, CredentialBound: bound,
 			Windows: map[string]statusWindow{}, InFlight: m.inFlightLocked(item, now),
+			PeakInFlight: item.peakInFlight,
+		}
+		if !item.peakAt.IsZero() {
+			value := item.peakAt
+			entry.PeakInFlightAt = &value
 		}
 		if item.Kind == kindPaid {
 			entry.MaxConcurrent = m.cfg.MaxConcurrent
@@ -1038,11 +1107,6 @@ func (g *stableIDGenerator) next(kind string, parts ...string) string {
 func keyFingerprint(key string) string {
 	digest := sha256.Sum256([]byte("synthetic-account\x00" + key))
 	return "acct-" + hex.EncodeToString(digest[:])[:10]
-}
-
-func shortHash(value string) string {
-	digest := sha256.Sum256([]byte(value))
-	return hex.EncodeToString(digest[:])[:8]
 }
 
 // isPlaceholderKey reports keys an operator has not filled in yet, such as

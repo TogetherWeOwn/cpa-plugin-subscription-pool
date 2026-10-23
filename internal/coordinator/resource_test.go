@@ -3,158 +3,681 @@ package coordinator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+
+	"github.com/TogetherWeOwn/cpa-plugin-subscription-pool/internal/usage"
 )
 
-// fakeStatusModule is a fakeModule that returns a fixed Status() payload, so
-// tests can drive the resource dashboard with realistic per-provider JSON
-// without any real provider logic.
+// fakeStatusModule is a fakeModule that returns a fixed Status() payload and
+// names accounts for the usage ledger, so tests can drive the usage page
+// with realistic per-provider JSON without any real provider logic.
 type fakeStatusModule struct {
 	fakeModule
-	status json.RawMessage
+	status   json.RawMessage
+	accounts map[string]string
 }
 
 func (m *fakeStatusModule) Status(context.Context) (json.RawMessage, error) {
 	return m.status, nil
 }
 
-func TestResourceStatusResponseRendersAccountsWithoutSecrets(t *testing.T) {
-	fiveHourReset := time.Date(2026, 9, 13, 18, 0, 0, 0, time.UTC)
-	weeklyReset := time.Date(2026, 9, 20, 0, 0, 0, 0, time.UTC)
-	zaiStatus, err := json.Marshal(map[string]any{
+func (m *fakeStatusModule) UsageAccount(record pluginapi.UsageRecord) string {
+	return m.accounts[record.AuthID]
+}
+
+var pageNow = time.Date(2026, 10, 23, 15, 0, 0, 0, time.UTC)
+
+const (
+	hiddenIdentity        = "test-only-private-account-pseudonym"
+	hiddenPaidLaneRef     = "openai-compatibility:synthetic:35470c92a63b"
+	hiddenInfiniteLaneRef = "openai-compatibility:synthetic-infinite:c5e9e38ce3e1"
+	hiddenAccount         = "acct-0123456789"
+	hostileName           = "go-1</script><script>alert(1)</script>"
+	// freeTextMarker stands for upstream error bodies and other free text a
+	// real module puts in health reasons, fallback reasons, sources and
+	// validation errors: none of it may reach the unauthenticated routes.
+	freeTextMarker = "FREE-TEXT-MARKER"
+)
+
+func mustJSON(t *testing.T, value any) json.RawMessage {
+	t.Helper()
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+// pageCoordinator hosts zai, opencode-go and synthetic fakes whose status
+// payloads carry the private fields each real module emits.
+func pageCoordinator(t *testing.T) *Coordinator {
+	t.Helper()
+	fiveHourReset := pageNow.Add(2 * time.Hour)
+	weeklyReset := pageNow.Add(4 * 24 * time.Hour)
+	zaiStatus := mustJSON(t, map[string]any{"accounts": []map[string]any{{
+		"identity":              hiddenIdentity,
+		"cooldown":              map[string]any{"active": true, "until": fiveHourReset, "reason": "retry_after", "source": "zai_runtime_health_v1"},
+		"name":                  "zai-pro-1",
+		"key_suffix":            "redacted",
+		"plan":                  "pro",
+		"five_hour_utilization": 0.42,
+		"weekly_utilization":    0.10,
+		"five_hour_resets_at":   fiveHourReset,
+		"weekly_resets_at":      weeklyReset,
+		"quota_source":          "quota_api",
+		"health":                "healthy",
+	}}})
+	opencodeStatus := mustJSON(t, map[string]any{"status": "registered", "accounts": []map[string]any{{
+		"name": hostileName,
+		"windows": map[string]any{"monthly": map[string]any{
+			"known": true, "utilization": 0.75, "resets_at": pageNow.Add(8 * 24 * time.Hour), "source": "dashboard usage poll", "authoritative": true,
+		}},
+	}}})
+	regen := pageNow.Add(40 * time.Minute)
+	syntheticStatus := mustJSON(t, map[string]any{
+		"provider": "synthetic", "status": "registered", "threshold_percent": 95,
 		"accounts": []map[string]any{
 			{
-				"identity":              "test-only-private-account-pseudonym",
-				"cooldown":              map[string]any{"active": true, "until": fiveHourReset, "reason": "retry_after", "source": "zai_runtime_health_v1"},
-				"name":                  "zai-pro-1",
-				"five_hour_utilization": 0.42,
-				"weekly_utilization":    0.10,
-				"five_hour_resets_at":   fiveHourReset,
-				"weekly_resets_at":      weeklyReset,
-				"quota_source":          "quota_api",
-				"quota_stale":           false,
-				"health":                "healthy",
+				"name": "synthetic#1", "provider": "synthetic", "kind": "paid", "auth_id": hiddenPaidLaneRef, "account": hiddenAccount,
+				"credential_bound": true, "health": "healthy", "next_regen_percent": 2, "in_flight": 1, "peak_in_flight": 7, "max_concurrent": 0,
+				"windows": map[string]any{"weekly": map[string]any{"known": true, "utilization": 0.0442, "resets_at": regen, "source": "response header (" + freeTextMarker + "-source)", "authoritative": false}},
+				"stats":   map[string]any{"requests": 20, "failures": 1, "output_tokens": 9000, "tps_samples": 20, "median_output_tps": 131.2, "mean_ttft_ms": 900},
 			},
-		},
-	})
-	if err != nil {
-		t.Fatalf("marshal zai status: %v", err)
-	}
-
-	monthlyReset := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
-	utilization := 0.75
-	opencodeStatus, err := json.Marshal(map[string]any{
-		"accounts": []map[string]any{
 			{
-				"name": "go-1",
-				"windows": map[string]any{
-					"monthly": map[string]any{
-						"known":         true,
-						"utilization":   utilization,
-						"exhausted":     false,
-						"resets_at":     monthlyReset,
-						"source":        "dashboard usage poll",
-						"authoritative": true,
-					},
-				},
+				"name": "synthetic-infinite#1", "provider": "synthetic-infinite", "kind": "infinite", "auth_id": hiddenInfiniteLaneRef, "account": hiddenAccount,
+				"credential_bound": true, "health": "throttled", "health_reason": "busy until 2026-10-23T15:10:00Z: infinite mode returned HTTP 429 " + freeTextMarker + "-health",
+				"in_flight": 0, "peak_in_flight": 10, "max_concurrent": 0,
+				"windows": map[string]any{"weekly": map[string]any{"known": true, "utilization": 0, "source": "infinite mode (free, not metered)"}},
+				"stats":   map[string]any{"requests": 45, "output_tokens": 30000, "tps_samples": 40, "median_output_tps": 5.1, "mean_ttft_ms": 13100},
 			},
 		},
+		"routing": map[string]any{"paid_picks": 20, "infinite_picks": 45, "fallbacks_to_infinite": 1, "rejections": 0, "infinite_non_stream_picks": 0,
+			"last_fallback_reason": "exhausted until 2026-10-23T16:00:00Z: HTTP 429 " + freeTextMarker + "-fallback", "last_fallback_at": pageNow.Add(-time.Minute)},
+		"observation_gaps": []string{freeTextMarker + "-gap"},
 	})
-	if err != nil {
-		t.Fatalf("marshal opencode-go status: %v", err)
-	}
-
 	zai := &fakeStatusModule{fakeModule: fakeModule{id: "zai"}, status: zaiStatus}
 	opencodeGo := &fakeStatusModule{fakeModule: fakeModule{id: "opencode-go"}, status: opencodeStatus}
-	c := New(zai, opencodeGo)
-	c.now = func() time.Time { return time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC) }
-
-	resp := c.handleManagement(context.Background(), pluginapi.ManagementRequest{
-		Method: http.MethodGet,
-		Path:   resourcePluginBasePath + resourceStatusPath,
-	})
-
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("StatusCode = %d, want 200", resp.StatusCode)
+	syn := &fakeStatusModule{
+		fakeModule: fakeModule{id: "synthetic"}, status: syntheticStatus,
+		accounts: map[string]string{hiddenPaidLaneRef: "synthetic#1", hiddenInfiniteLaneRef: "synthetic-infinite#1"},
 	}
-	if resp.Headers.Get("Content-Type") != resourceContentType {
-		t.Fatalf("Content-Type = %q", resp.Headers.Get("Content-Type"))
-	}
+	c := New(zai, opencodeGo, syn)
+	c.now = func() time.Time { return pageNow }
+	c.registry.swap(map[string]registryEntry{hiddenPaidLaneRef: {providerID: "synthetic"}, hiddenInfiniteLaneRef: {providerID: "synthetic"}})
+	_ = c.recordError(errors.New("provider zai: " + freeTextMarker + "-validation"))
+	return c
+}
 
+func usageRecord(authID, alias string, at time.Time, out int64, status int) pluginapi.UsageRecord {
+	record := pluginapi.UsageRecord{
+		AuthID: authID, Provider: "openai-compatible-synthetic", Alias: alias, Model: "hf:upstream", APIKey: "client-key-must-not-leak",
+		RequestedAt: at, Latency: 20 * time.Second, TTFT: 10 * time.Second,
+		Detail: pluginapi.UsageDetail{InputTokens: 2000, OutputTokens: out},
+	}
+	if status != 0 {
+		record.Failed = true
+		record.Failure = pluginapi.UsageFailure{StatusCode: status, Body: "Too many concurrent requests"}
+	}
+	return record
+}
+
+func get(c *Coordinator, path string, query url.Values) pluginapi.ManagementResponse {
+	return c.handleManagement(context.Background(), pluginapi.ManagementRequest{Method: http.MethodGet, Path: path, Query: query})
+}
+
+func assertRedacted(t *testing.T, body string) {
+	t.Helper()
+	for _, forbidden := range []string{hiddenIdentity, hiddenPaidLaneRef, hiddenInfiniteLaneRef, "openai-compatibility:", hiddenAccount, "retry_after", "zai_runtime_health_v1", "client-key-must-not-leak", "Bearer", "dashboard-api-key", "key_suffix", freeTextMarker, "Too many concurrent requests"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("usage output contains forbidden %q", forbidden)
+		}
+	}
+}
+
+func TestUsagePageServesNoncedScriptAndEscapedInitialData(t *testing.T) {
+	c := pageCoordinator(t)
+	resp := get(c, resourcePluginBasePath+resourceStatusPath, nil)
+	if resp.StatusCode != http.StatusOK || resp.Headers.Get("Content-Type") != resourceContentType {
+		t.Fatalf("page = %d %q", resp.StatusCode, resp.Headers.Get("Content-Type"))
+	}
 	body := string(resp.Body)
-	for _, required := range []string{"Subscription Quota", "zai-pro-1", "go-1", "42%", "75%", "quota_api", "authoritative"} {
-		if !strings.Contains(body, required) {
-			t.Fatalf("resource page missing %q; body = %s", required, body)
-		}
-	}
-	for _, forbidden := range []string{"management", "Bearer", "Authorization", "dashboard-api-key", "key\"", "secret", "test-only-private-account-pseudonym", "retry_after", "zai_runtime_health_v1"} {
-		if strings.Contains(strings.ToLower(body), strings.ToLower(forbidden)) {
-			t.Fatalf("resource page contains forbidden %q", forbidden)
-		}
-	}
-
 	csp := resp.Headers.Get("Content-Security-Policy")
-	for _, directive := range []string{"default-src 'none'", "style-src 'unsafe-inline'", "base-uri 'none'", "form-action 'none'"} {
+	match := regexp.MustCompile(`script-src 'nonce-([A-Za-z0-9_-]{20,})'`).FindStringSubmatch(csp)
+	if match == nil {
+		t.Fatalf("CSP %q has no script nonce", csp)
+	}
+	if !strings.Contains(body, `<script nonce="`+match[1]+`">`) {
+		t.Fatal("inline script does not carry the CSP nonce")
+	}
+	for _, directive := range []string{"default-src 'none'", "style-src 'unsafe-inline'", "connect-src 'self'", "base-uri 'none'", "form-action 'none'"} {
 		if !strings.Contains(csp, directive) {
-			t.Fatalf("content security policy %q missing %q", csp, directive)
+			t.Fatalf("CSP %q missing %q", csp, directive)
 		}
 	}
-	if strings.Contains(csp, "frame-ancestors") {
-		t.Fatalf("content security policy %q blocks documented cross-origin Management Center embedding", csp)
+	for _, unsafe := range []string{"unsafe-eval", "frame-ancestors", "script-src 'unsafe-inline'"} {
+		if strings.Contains(csp, unsafe) {
+			t.Fatalf("CSP %q contains %q", csp, unsafe)
+		}
 	}
-	if resp.Headers.Get("Referrer-Policy") != "no-referrer" {
-		t.Fatalf("Referrer-Policy = %q", resp.Headers.Get("Referrer-Policy"))
+	if strings.Contains(body, usagePageNonceMarker) || strings.Contains(body, usagePageInitialMarker) {
+		t.Fatal("template markers left in the page")
 	}
-	if resp.Headers.Get("X-Content-Type-Options") != "nosniff" {
-		t.Fatalf("X-Content-Type-Options = %q", resp.Headers.Get("X-Content-Type-Options"))
+	for _, header := range [][2]string{{"Referrer-Policy", "no-referrer"}, {"X-Content-Type-Options", "nosniff"}, {"Cache-Control", "no-store"}} {
+		if got := resp.Headers.Get(header[0]); got != header[1] {
+			t.Fatalf("%s = %q", header[0], got)
+		}
 	}
-	if resp.Headers.Get("Cache-Control") != "no-store" {
-		t.Fatalf("Cache-Control = %q", resp.Headers.Get("Cache-Control"))
+	// A hostile account name cannot close the data element or inject a script.
+	if strings.Contains(body, "</script><script>alert(1)") {
+		t.Fatal("initial data was not HTML-escaped")
+	}
+	start := strings.Index(body, `<script type="application/json" id="sp-data">`)
+	end := strings.Index(body[start:], "</script>")
+	if start < 0 || end < 0 {
+		t.Fatal("initial data element missing")
+	}
+	var initial usagePageData
+	if err := json.Unmarshal([]byte(body[start+len(`<script type="application/json" id="sp-data">`):start+end]), &initial); err != nil {
+		t.Fatalf("initial data is not JSON: %v", err)
+	}
+	if len(initial.Quota) != 4 || initial.Quota[1].Account != hostileName {
+		t.Fatalf("initial quota = %+v", initial.Quota)
+	}
+	assertRedacted(t, body)
+
+	again := get(c, resourceStatusPath, nil)
+	if again.Headers.Get("Content-Security-Policy") == csp {
+		t.Fatal("nonce must change on every response")
+	}
+}
+
+func TestUsageDataReportsQuotaWindowsAndSyntheticPanel(t *testing.T) {
+	c := pageCoordinator(t)
+	resp := get(c, resourcePluginBasePath+resourceUsageDataPath, nil)
+	if resp.StatusCode != http.StatusOK || resp.Headers.Get("Content-Type") != managementContentType || resp.Headers.Get("Cache-Control") != "no-store" {
+		t.Fatalf("usage.json = %d %v", resp.StatusCode, resp.Headers)
+	}
+	assertRedacted(t, string(resp.Body))
+	var data usagePageData
+	if err := json.Unmarshal(resp.Body, &data); err != nil {
+		t.Fatal(err)
+	}
+	if data.Plugin != PluginID || data.Usage.Range != "24h" || strings.Join(data.Ranges, ",") != "1h,6h,24h,7d" {
+		t.Fatalf("header = %s %s %v", data.Plugin, data.Usage.Range, data.Ranges)
+	}
+	if len(data.Providers) != 3 || data.Providers[0].Label != "Z.ai" || data.Providers[1].Label != "OpenCode Go" || data.Providers[2].Label != "synthetic.new" || data.Providers[2].Accounts != 2 {
+		t.Fatalf("providers = %+v", data.Providers)
+	}
+	zai := data.Quota[0]
+	if zai.Plan != "pro" || len(zai.Windows) != 2 || *zai.Windows[0].RemainingPercent != 58 || !zai.Windows[0].Authoritative || zai.Windows[0].WindowSeconds != 5*3600 {
+		t.Fatalf("zai card = %+v", zai)
+	}
+	if !zai.Windows[0].ResetsAt.Equal(pageNow.Add(2*time.Hour)) || !zai.Windows[0].StartsAt.Equal(pageNow.Add(-3*time.Hour)) {
+		t.Fatalf("zai 5-hour window = %v .. %v", zai.Windows[0].StartsAt, zai.Windows[0].ResetsAt)
+	}
+	goCard := data.Quota[1]
+	if len(goCard.Windows) != 3 || goCard.Windows[0].Known || *goCard.Windows[2].UsedPercent != 75 {
+		t.Fatalf("opencode-go card = %+v", goCard)
+	}
+	paid, infinite := data.Quota[2], data.Quota[3]
+	weekly := paid.Windows[0]
+	if paid.Kind != "paid" || weekly.Mode != "regen" || *weekly.RemainingPercent != 95.58 || *weekly.RegenPercent != 2 || weekly.ThresholdPercent != 95 {
+		t.Fatalf("synthetic paid window = %+v", weekly)
+	}
+	// 4.42% used refills in three 2% ticks: 40 min, then 2 x 202 min later.
+	if !weekly.ResetsAt.Equal(pageNow.Add(40*time.Minute)) || !weekly.FullAt.Equal(pageNow.Add(40*time.Minute+2*202*time.Minute)) {
+		t.Fatalf("regen next %v full %v", weekly.ResetsAt, weekly.FullAt)
+	}
+	if infinite.Kind != "infinite" || infinite.Windows[0].Mode != "free" {
+		t.Fatalf("infinite card = %+v", infinite)
+	}
+	panel := data.Synthetic
+	if panel == nil || panel.ThresholdPercent != 95 || panel.RegenIntervalMinutes != 202 || len(panel.Lanes) != 2 || panel.Lanes[1].PeakInFlight != 10 || *panel.Lanes[1].MedianTPS != 5.1 {
+		t.Fatalf("synthetic panel = %+v", panel)
+	}
+	if len(panel.Schedule) != 3 || panel.Schedule[2].RemainingPercent != 100 || panel.Schedule[2].AddsPercent != 0.42 {
+		t.Fatalf("regen schedule = %+v", panel.Schedule)
+	}
+	if panel.Routing.Fallbacks != 1 || panel.Routing.InfinitePicks != 45 || panel.Routing.LastFallbackReason != "quota_exhausted" {
+		t.Fatalf("routing = %+v", panel.Routing)
+	}
+	if infinite.Health != "throttled" || infinite.Reason != "resting" || panel.Lanes[1].Reason != "resting" {
+		t.Fatalf("infinite reason = %q / %q, want the closed code resting", infinite.Reason, panel.Lanes[1].Reason)
+	}
+	if weekly.Source != "response_header" || zai.Windows[0].Source != "authoritative" || goCard.Windows[2].Source != "authoritative" {
+		t.Fatalf("sources = %q %q %q", weekly.Source, zai.Windows[0].Source, goCard.Windows[2].Source)
+	}
+	if !data.ValidationFailed || data.Status != "reconfigure_rejected" {
+		t.Fatalf("validation = %v %q", data.ValidationFailed, data.Status)
+	}
+}
+
+func TestUsageDataCountsDispatchedUsagePerAccountAndModel(t *testing.T) {
+	c := pageCoordinator(t)
+	_ = c.handleUsage(usageRecord(hiddenPaidLaneRef, "synthetic/deepseek-v4.1-flash", pageNow.Add(-10*time.Minute), 400, 0))
+	_ = c.handleUsage(usageRecord(hiddenPaidLaneRef, "synthetic/deepseek-v4.1-flash", pageNow.Add(-9*time.Minute), 0, http.StatusTooManyRequests))
+	_ = c.handleUsage(usageRecord(hiddenInfiniteLaneRef, "synthetic/deepseek-v4.1-flash", pageNow.Add(-3*time.Hour), 600, 0))
+	_ = c.handleUsage(usageRecord("not-ours", "other", pageNow, 1, 0))
+
+	for _, path := range []string{resourcePluginBasePath + resourceUsageDataPath, managementUsagePath} {
+		resp := get(c, path, url.Values{"range": {"1h"}})
+		assertRedacted(t, string(resp.Body))
+		var data usagePageData
+		if err := json.Unmarshal(resp.Body, &data); err != nil {
+			t.Fatal(err)
+		}
+		if data.Usage.Range != "1h" || len(data.Usage.Buckets) != 12 || len(data.Usage.Totals) != 1 {
+			t.Fatalf("%s 1h usage = %+v", path, data.Usage)
+		}
+		total := data.Usage.Totals[0]
+		if total.Provider != "synthetic" || total.Account != "synthetic#1" || total.Model != "synthetic/deepseek-v4.1-flash" ||
+			total.Requests != 2 || total.Failures != 1 || total.Status429 != 1 || total.OutputTokens != 400 || total.InputTokens != 4000 {
+			t.Fatalf("%s 1h total = %+v", path, total)
+		}
+	}
+	week := get(c, resourceUsageDataPath, url.Values{"range": {"7d"}})
+	var data usagePageData
+	if err := json.Unmarshal(week.Body, &data); err != nil {
+		t.Fatal(err)
+	}
+	if data.Usage.Range != "7d" || len(data.Usage.Totals) != 2 || data.Usage.Records != 3 {
+		t.Fatalf("7d usage = %+v", data.Usage)
+	}
+	bogus := get(c, resourceUsageDataPath, url.Values{"range": {"<script>"}})
+	if err := json.Unmarshal(bogus.Body, &data); err != nil || data.Usage.Range != "24h" {
+		t.Fatalf("unknown range = %q, %v", data.Usage.Range, err)
+	}
+}
+
+func TestUsageRoutesAreRegistered(t *testing.T) {
+	routes := New(&fakeModule{id: "alpha"}).managementRoutes()
+	var usageRoute bool
+	for _, route := range routes.Routes {
+		if route.Method == http.MethodGet && route.Path == managementUsagePath {
+			usageRoute = true
+		}
+	}
+	if !usageRoute {
+		t.Fatalf("routes = %+v, want GET %s", routes.Routes, managementUsagePath)
+	}
+	// The host HTML-escapes plugin menu labels in its plugin list, so a label
+	// with &, <, >, ' or " would show its entity text in the sidebar.
+	if strings.ContainsAny(usagePageMenu, "&<>'\"") {
+		t.Fatalf("menu label %q contains characters the host escapes", usagePageMenu)
+	}
+	if len(routes.Resources) != 2 || routes.Resources[0].Path != resourceStatusPath || routes.Resources[0].Menu != usagePageMenu ||
+		routes.Resources[1].Path != resourceUsageDataPath || routes.Resources[1].Menu != "" {
+		t.Fatalf("resources = %+v", routes.Resources)
 	}
 }
 
 func TestResourceStatusResponseHandlesLookalikeResourcePath(t *testing.T) {
 	c := New(&fakeModule{id: "alpha"})
-	resp := c.handleManagement(context.Background(), pluginapi.ManagementRequest{
-		Method: http.MethodGet,
-		Path:   "/attacker" + resourcePluginBasePath + resourceStatusPath,
-	})
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("lookalike resource path status = %d, want 404", resp.StatusCode)
-	}
-}
-
-func TestResourceStatusResponseRendersEmptyStateWhenNoAccountsConfigured(t *testing.T) {
-	c := New(&fakeModule{id: "alpha"})
-	resp := c.handleManagement(context.Background(), pluginapi.ManagementRequest{
-		Method: http.MethodGet,
-		Path:   resourceStatusPath,
-	})
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("StatusCode = %d, want 200", resp.StatusCode)
-	}
-	if !strings.Contains(string(resp.Body), "No accounts are configured yet.") {
-		t.Fatalf("resource page missing empty state: %s", resp.Body)
-	}
-}
-
-func TestHealthClassAllowlistsThrottled(t *testing.T) {
-	for health, want := range map[string]string{
-		"healthy":                "healthy",
-		"throttled":              "throttled",
-		"exhausted":              "exhausted",
-		"suspended":              "suspended",
-		"disabled":               "disabled",
-		"throttled\" onload=\"x": "unknown",
-		"":                       "unknown",
-	} {
-		if got := healthClass(health); got != want {
-			t.Fatalf("healthClass(%q) = %q, want %q", health, got, want)
+	for _, path := range []string{"/attacker" + resourcePluginBasePath + resourceStatusPath, "/attacker" + resourcePluginBasePath + resourceUsageDataPath} {
+		if resp := get(c, path, nil); resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("lookalike resource path %s status = %d, want 404", path, resp.StatusCode)
 		}
+	}
+}
+
+func TestUsagePageRendersWithNoAccounts(t *testing.T) {
+	c := New(&fakeModule{id: "alpha"})
+	resp := get(c, resourceStatusPath, nil)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(resp.Body), "No accounts are configured yet.") {
+		t.Fatalf("empty page = %d", resp.StatusCode)
+	}
+	var data usagePageData
+	if err := json.Unmarshal(get(c, resourceUsageDataPath, nil).Body, &data); err != nil || len(data.Quota) != 0 || data.Synthetic != nil {
+		t.Fatalf("empty data = %+v, %v", data, err)
+	}
+}
+
+func TestUsageLedgerPersistsAcrossRestart(t *testing.T) {
+	dir := t.TempDir()
+	c := pageCoordinator(t)
+	c.attachLedgerStore(dir)
+	_ = c.handleUsage(usageRecord(hiddenPaidLaneRef, "synthetic/glm-5.3", pageNow.Add(-time.Minute), 100, 0))
+	c.flushLedger()
+	saved := filepath.Join(dir, ledgerSubdir, ledgerStateName)
+	raw, err := os.ReadFile(saved)
+	if err != nil {
+		t.Fatalf("ledger not saved: %v", err)
+	}
+	if info, _ := os.Stat(saved); info.Mode().Perm() != 0o600 {
+		t.Fatalf("ledger mode = %v, want 0600", info.Mode().Perm())
+	}
+	assertRedacted(t, string(raw))
+
+	restarted := pageCoordinator(t)
+	restarted.attachLedgerStore(dir)
+	var data usagePageData
+	if err := json.Unmarshal(get(restarted, resourceUsageDataPath, url.Values{"range": {"1h"}}).Body, &data); err != nil {
+		t.Fatal(err)
+	}
+	if len(data.Usage.Totals) != 1 || data.Usage.Totals[0].OutputTokens != 100 || !data.Ledger.Persisted {
+		t.Fatalf("restored usage = %+v, ledger %+v", data.Usage.Totals, data.Ledger)
+	}
+}
+
+func TestUsageAfterShutdownIsNotAdmitted(t *testing.T) {
+	dir := t.TempDir()
+	c := pageCoordinator(t)
+	c.attachLedgerStore(dir)
+	syn := c.modules[2].module.(*fakeStatusModule)
+	_ = c.handleUsage(usageRecord(hiddenPaidLaneRef, "synthetic/glm-5.3", pageNow.Add(-time.Minute), 10, 0))
+	if err := c.Shutdown(); err != nil {
+		t.Fatal(err)
+	}
+	callsBefore := len(syn.usageCalls)
+	before := c.ledger.Query(usage.RangeByID("1h"), pageNow)
+	if callsBefore != 1 || before.Records != 1 {
+		t.Fatalf("before shutdown: %d module calls, %d records; want 1 and 1", callsBefore, before.Records)
+	}
+
+	_ = c.handleUsage(usageRecord(hiddenPaidLaneRef, "synthetic/glm-5.3", pageNow, 10, 0))
+	c.ledgerStore.wg.Wait()
+	// Rejected at admission: the closed module is never called and the
+	// ledger the final flush saved is unchanged, independent of the
+	// downstream no-save check.
+	if got := len(syn.usageCalls); got != callsBefore {
+		t.Fatalf("module HandleUsage called %d times after shutdown, want %d", got, callsBefore)
+	}
+	if after := c.ledger.Query(usage.RangeByID("1h"), pageNow); !reflect.DeepEqual(before, after) || c.ledger.Dirty() {
+		t.Fatalf("ledger changed after shutdown:\nbefore %+v\nafter  %+v (dirty %v)", before, after, c.ledger.Dirty())
+	}
+	saved, err := os.ReadFile(filepath.Join(dir, ledgerSubdir, ledgerStateName))
+	if err != nil {
+		t.Fatalf("shutdown flush wrote nothing: %v", err)
+	}
+	restored := New(&fakeModule{id: "synthetic"})
+	if err := restored.ledger.UnmarshalState(saved, pageNow); err != nil {
+		t.Fatal(err)
+	}
+	if got := restored.ledger.Query(usage.RangeByID("1h"), pageNow); got.Records != 1 || len(got.Totals) != 1 || got.Totals[0].Requests != 1 {
+		t.Fatalf("saved ledger = %+v, want only the record handled before shutdown", got)
+	}
+}
+
+func TestFailedLedgerSaveIsRetriedByTheShutdownFlush(t *testing.T) {
+	dir := t.TempDir()
+	c := pageCoordinator(t)
+	c.attachLedgerStore(dir)
+	usageDir := filepath.Join(dir, ledgerSubdir)
+	// Break the store: a regular file where the usage directory should be.
+	if err := os.RemoveAll(usageDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(usageDir, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_ = c.handleUsage(usageRecord(hiddenPaidLaneRef, "synthetic/glm-5.3", pageNow, 10, 0))
+	c.ledgerStore.wg.Wait()
+	// The public payload carries a closed code, never the error text (an
+	// absolute path); the authenticated route adds the detail.
+	public := get(c, resourceUsageDataPath, nil).Body
+	var data usagePageData
+	if err := json.Unmarshal(public, &data); err != nil {
+		t.Fatal(err)
+	}
+	if data.Ledger.Persisted || data.Ledger.PersistError != "write_failed" || data.Ledger.PersistDetail != "" || strings.Contains(string(public), dir) {
+		t.Fatalf("public ledger info = %+v (body leaks the path: %v)", data.Ledger, strings.Contains(string(public), dir))
+	}
+	if err := json.Unmarshal(get(c, managementUsagePath, nil).Body, &data); err != nil {
+		t.Fatal(err)
+	}
+	if data.Ledger.PersistError != "write_failed" || !strings.Contains(data.Ledger.PersistDetail, "not a directory") {
+		t.Fatalf("authenticated ledger info = %+v, want the code and the detail", data.Ledger)
+	}
+	// Repair the disk; the flush must write what the failed save could not.
+	if err := os.Remove(usageDir); err != nil {
+		t.Fatal(err)
+	}
+	c.flushLedger()
+	if _, err := os.Stat(filepath.Join(usageDir, ledgerStateName)); err != nil {
+		t.Fatalf("shutdown flush did not retry the failed save: %v", err)
+	}
+}
+
+// blockingUsageModule holds HandleUsage until released, to overlap a usage
+// record with Shutdown.
+type blockingUsageModule struct {
+	fakeStatusModule
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (m *blockingUsageModule) HandleUsage(context.Context, pluginapi.UsageRecord) error {
+	close(m.entered)
+	<-m.release
+	return nil
+}
+
+func TestShutdownWaitsForInFlightUsageBeforeTheFinalFlush(t *testing.T) {
+	dir := t.TempDir()
+	blocking := &blockingUsageModule{
+		fakeStatusModule: fakeStatusModule{fakeModule: fakeModule{id: "synthetic"}, status: json.RawMessage(`{}`), accounts: map[string]string{hiddenPaidLaneRef: "lane-a"}},
+		entered:          make(chan struct{}), release: make(chan struct{}),
+	}
+	c := New(blocking)
+	c.now = func() time.Time { return pageNow }
+	c.registry.swap(map[string]registryEntry{hiddenPaidLaneRef: {providerID: "synthetic"}})
+	c.attachLedgerStore(dir)
+	c.ledgerStore.savedAt = pageNow // no background save during the test
+	go func() { _ = c.handleUsage(usageRecord(hiddenPaidLaneRef, "m", pageNow, 1, 0)) }()
+	<-blocking.entered
+	done := make(chan struct{})
+	go func() { _ = c.Shutdown(); close(done) }()
+	select {
+	case <-done:
+		t.Fatal("Shutdown returned while a usage record was still being handled")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(blocking.release)
+	<-done
+	restored := New(&fakeModule{id: "synthetic"})
+	restored.now = func() time.Time { return pageNow }
+	restored.attachLedgerStore(dir)
+	var data usagePageData
+	if err := json.Unmarshal(get(restored, resourceUsageDataPath, url.Values{"range": {"1h"}}).Body, &data); err != nil {
+		t.Fatal(err)
+	}
+	if len(data.Usage.Totals) != 1 || data.Usage.Totals[0].Account != "lane-a" {
+		t.Fatalf("persisted usage after shutdown = %+v, want the record handled during shutdown", data.Usage.Totals)
+	}
+}
+
+func TestReasonAndSourceCodesAreAClosedVocabulary(t *testing.T) {
+	reasons := map[string]string{
+		"":    "",
+		"   ": "",
+		"exhausted until 2026-10-23T16:00:00Z: " + freeTextMarker:   "quota_exhausted",
+		"weekly credits 96.0% used, at or above the 95% threshold":  "at_threshold",
+		"paid concurrency cap 4 reached":                            "concurrency_cap",
+		"infinite concurrency cap 1 reached":                        "concurrency_cap",
+		"busy until 2026-10-23T15:10:00Z: " + freeTextMarker:        "resting",
+		"credential not bound to a known account " + freeTextMarker: "unbound_credential",
+		"no API key yet (placeholder): " + freeTextMarker:           "placeholder_key",
+		"upstream said " + freeTextMarker:                           "other",
+		freeTextMarker:                                              "other",
+	}
+	for text, want := range reasons {
+		if got := reasonCode(text); got != want {
+			t.Fatalf("reasonCode(%q) = %q, want %q", text, got, want)
+		}
+	}
+	type source struct {
+		raw           string
+		authoritative bool
+	}
+	sources := map[source]string{
+		{freeTextMarker, true}:                              "authoritative",
+		{"quota_api", false}:                                "authoritative",
+		{"authoritative", false}:                            "authoritative",
+		{"estimate", false}:                                 "estimate",
+		{"quota poll (" + freeTextMarker + ")", false}:      "quota_poll",
+		{"response header (" + freeTextMarker + ")", false}: "response_header",
+		{"proxy-observed 429 " + freeTextMarker, false}:     "429_derived",
+		{"429-derived", false}:                              "429_derived",
+		{"infinite mode (free, not metered)", false}:        "free",
+		{"", false}:        "unknown",
+		{"unknown", false}: "unknown",
+		{"dashboard scrape " + freeTextMarker, false}: "observed",
+		{freeTextMarker, false}:                       "observed",
+	}
+	for in, want := range sources {
+		if got := sourceCode(in.raw, in.authoritative); got != want {
+			t.Fatalf("sourceCode(%q, %v) = %q, want %q", in.raw, in.authoritative, got, want)
+		}
+	}
+}
+
+// TestUnrecognizedReasonsAndSourcesNeverReachThePublicPage feeds every
+// public reason and source field a text no vocabulary branch recognizes:
+// each must arrive as the fallback code, on both public payload forms.
+func TestUnrecognizedReasonsAndSourcesNeverReachThePublicPage(t *testing.T) {
+	unknown := "upstream said " + freeTextMarker
+	zaiStatus := mustJSON(t, map[string]any{"accounts": []map[string]any{{
+		"name": "zai-pro-1", "plan": "pro", "health": "healthy", "five_hour_utilization": 0.5, "weekly_utilization": 0.1,
+		"five_hour_resets_at": pageNow.Add(time.Hour), "weekly_resets_at": pageNow.Add(48 * time.Hour), "quota_source": unknown,
+	}}})
+	opencodeStatus := mustJSON(t, map[string]any{"status": "registered", "accounts": []map[string]any{{
+		"name":    "go-1",
+		"windows": map[string]any{"weekly": map[string]any{"known": true, "utilization": 0.2, "resets_at": pageNow.Add(time.Hour), "source": unknown, "authoritative": false}},
+	}}})
+	syntheticStatus := mustJSON(t, map[string]any{
+		"status": "registered", "threshold_percent": 95,
+		"accounts": []map[string]any{{
+			"name": "synthetic#1", "provider": "synthetic", "kind": "paid", "health": "throttled", "health_reason": unknown,
+			"windows": map[string]any{"weekly": map[string]any{"known": true, "utilization": 0.3, "resets_at": pageNow.Add(time.Hour), "source": unknown}},
+		}},
+		"routing": map[string]any{"fallbacks_to_infinite": 1, "last_fallback_reason": unknown, "last_fallback_at": pageNow},
+	})
+	c := New(
+		&fakeStatusModule{fakeModule: fakeModule{id: "zai"}, status: zaiStatus},
+		&fakeStatusModule{fakeModule: fakeModule{id: "opencode-go"}, status: opencodeStatus},
+		&fakeStatusModule{fakeModule: fakeModule{id: "synthetic"}, status: syntheticStatus},
+	)
+	c.now = func() time.Time { return pageNow }
+
+	jsonBody := string(get(c, resourcePluginBasePath+resourceUsageDataPath, nil).Body)
+	page := string(get(c, resourcePluginBasePath+resourceStatusPath, nil).Body)
+	start := strings.Index(page, `<script type="application/json" id="sp-data">`)
+	if start < 0 {
+		t.Fatal("page has no initial data element")
+	}
+	start += len(`<script type="application/json" id="sp-data">`)
+	embedded := page[start : start+strings.Index(page[start:], "</script>")]
+	for form, body := range map[string]string{"usage.json": jsonBody, "page": page} {
+		if strings.Contains(body, freeTextMarker) || strings.Contains(body, "upstream said") {
+			t.Fatalf("%s carries unrecognized free text", form)
+		}
+	}
+	for form, body := range map[string]string{"usage.json": jsonBody, "page data": embedded} {
+		var data usagePageData
+		if err := json.Unmarshal([]byte(body), &data); err != nil {
+			t.Fatalf("%s: %v", form, err)
+		}
+		if len(data.Quota) != 3 || data.Synthetic == nil || len(data.Synthetic.Lanes) != 1 {
+			t.Fatalf("%s: quota %+v, synthetic %+v", form, data.Quota, data.Synthetic)
+		}
+		zai, goCard, paid := data.Quota[0], data.Quota[1], data.Quota[2]
+		if zai.Windows[0].Source != "observed" || zai.Windows[1].Source != "observed" || goCard.Windows[1].Source != "observed" || paid.Windows[0].Source != "observed" {
+			t.Fatalf("%s sources = %q %q %q %q, want observed", form, zai.Windows[0].Source, zai.Windows[1].Source, goCard.Windows[1].Source, paid.Windows[0].Source)
+		}
+		if paid.Reason != "other" || data.Synthetic.Lanes[0].Reason != "other" || data.Synthetic.Routing.LastFallbackReason != "other" {
+			t.Fatalf("%s reasons = %q %q %q, want other", form, paid.Reason, data.Synthetic.Lanes[0].Reason, data.Synthetic.Routing.LastFallbackReason)
+		}
+	}
+}
+
+func writeLedgerFile(t *testing.T, dir, content string) string {
+	t.Helper()
+	path := filepath.Join(dir, ledgerSubdir, ledgerStateName)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestUnreadableLedgerIsNeverOverwritten(t *testing.T) {
+	for name, tc := range map[string]struct{ content, code string }{
+		"corrupt":       {"{not json", "read_failed"},
+		"newer version": {`{"version":9,"records":5}`, "decode_failed"},
+	} {
+		content := tc.content
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := writeLedgerFile(t, dir, content)
+			c := pageCoordinator(t)
+			c.attachLedgerStore(dir)
+			_ = c.handleUsage(usageRecord(hiddenPaidLaneRef, "synthetic/glm-5.3", pageNow, 10, 0))
+			c.ledgerStore.wg.Wait()
+			c.flushLedger()
+			if raw, _ := os.ReadFile(path); string(raw) != content {
+				t.Fatalf("an unreadable saved ledger was overwritten with %d bytes", len(raw))
+			}
+			if persisted, code, _ := c.ledgerPersistenceStatus(); persisted || code != tc.code {
+				t.Fatalf("persistence = %v %q, want not persisted, %s", persisted, code, tc.code)
+			}
+			// The next reconfigure retries; once the file is gone, saving resumes
+			// and the records kept in memory meanwhile are written.
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			c.attachLedgerStore(dir)
+			c.flushLedger()
+			restored := New(&fakeModule{id: "synthetic"})
+			restored.now = func() time.Time { return pageNow }
+			restored.attachLedgerStore(dir)
+			if got := restored.ledger.Query(usage.RangeByID("1h"), pageNow); got.Records != 1 {
+				t.Fatalf("after recovery the saved ledger has %d records, want 1", got.Records)
+			}
+		})
+	}
+}
+
+func TestLedgerStaysInTheDirectoryItLoadedFrom(t *testing.T) {
+	first, second := t.TempDir(), t.TempDir()
+	// The second directory already holds another installation's history.
+	other := usage.New()
+	other.Record("zai", "zai-pro-1", pluginapi.UsageRecord{Alias: "glm-5.3", RequestedAt: pageNow.Add(-time.Minute)}, pageNow)
+	otherRaw, err := other.MarshalState(pageNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherPath := writeLedgerFile(t, second, string(otherRaw))
+
+	c := pageCoordinator(t)
+	c.attachLedgerStore(first)
+	c.ledgerStore.savedAt = pageNow // only the final flush writes
+	_ = c.handleUsage(usageRecord(hiddenPaidLaneRef, "synthetic/glm-5.3", pageNow, 10, 0))
+	// The host's auth-dir changes at runtime: the ledger keeps saving to the
+	// directory it loaded from until a restart, and never replaces the
+	// history in the new one.
+	c.attachLedgerStore(second)
+	_ = c.handleUsage(usageRecord(hiddenPaidLaneRef, "synthetic/glm-5.3", pageNow, 10, 0))
+	c.flushLedger()
+	if raw, _ := os.ReadFile(otherPath); string(raw) != string(otherRaw) {
+		t.Fatal("the ledger replaced the history in the new auth directory")
+	}
+	restored := New(&fakeModule{id: "synthetic"})
+	restored.now = func() time.Time { return pageNow }
+	restored.attachLedgerStore(first)
+	if got := restored.ledger.Query(usage.RangeByID("1h"), pageNow); got.Records != 2 {
+		t.Fatalf("the first directory holds %d records, want 2", got.Records)
 	}
 }

@@ -2,8 +2,11 @@ package coordinator
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -129,9 +132,86 @@ func TestCoordinatorRegistersWithoutZaiAndRoutesSynthetic(t *testing.T) {
 	if syn["status"] != "registered" || syn["credential_bound"] != false {
 		t.Fatalf("synthetic status = %v", syn)
 	}
-	page := string(c.resourceStatusResponse().Body)
-	if !strings.Contains(page, "synthetic.new paid") || !strings.Contains(page, "synthetic.new infinite") || strings.Contains(page, "PLACEHOLDER") {
-		t.Fatalf("dashboard missing synthetic lanes or leaked the key field")
+	// The usage page sees both lanes and the dispatched usage, attributed to
+	// the paid lane by name, without the key, its placeholder or auth IDs.
+	resp2 := c.HandleManagement(context.Background(), pluginapi.ManagementRequest{Method: http.MethodGet, Path: resourcePluginBasePath + resourceUsageDataPath})
+	page := string(resp2.Body)
+	if strings.Contains(page, "PLACEHOLDER") || strings.Contains(page, "openai-compatibility:") || strings.Contains(page, "test-only-go-key") {
+		t.Fatalf("usage data leaked a key field or auth ID")
+	}
+	var data usagePageData
+	if err := json.Unmarshal(resp2.Body, &data); err != nil {
+		t.Fatal(err)
+	}
+	kinds := map[string]bool{}
+	for _, card := range data.Quota {
+		if card.Provider == "synthetic" {
+			kinds[card.Kind] = true
+		}
+	}
+	if !kinds["paid"] || !kinds["infinite"] || data.Synthetic == nil {
+		t.Fatalf("usage data missing synthetic lanes: %+v", data.Quota)
+	}
+	paidLane := ""
+	for _, card := range data.Quota {
+		if card.Provider == "synthetic" && card.Kind == "paid" {
+			paidLane = card.Account
+		}
+	}
+	if len(data.Usage.Totals) != 1 || paidLane != "synthetic#1" || data.Usage.Totals[0].Account != paidLane || data.Usage.Totals[0].Status429 != 1 {
+		t.Fatalf("usage totals = %+v, paid lane %q", data.Usage.Totals, paidLane)
+	}
+}
+
+// TestUsagePageCarriesNoCredentialDerivedLaneNames reproduces the review
+// probe: a real synthetic module configured with a key; every value an
+// outsider could compute from that key and the public endpoint settings
+// (auth ID hash, its hashes, the account fingerprint) must be absent from
+// the unauthenticated usage data, before and after usage is recorded.
+func TestUsagePageCarriesNoCredentialDerivedLaneNames(t *testing.T) {
+	root := t.TempDir()
+	authDir := filepath.Join(root, "auth")
+	configPath := filepath.Join(root, "config.yaml")
+	const key = "test-only-synthetic-key-for-fingerprint-probe"
+	writeSyntheticHostConfig(t, configPath, authDir, key)
+	c := New(zai.NewModule(), opencodego.NewModule(), synthetic.NewModule())
+	defer func() { _ = c.Shutdown() }()
+	if err := c.Reconfigure([]byte("cpa-config-path: " + configPath + "\nproviders:\n  synthetic:\n    quota-refresh-interval: \"0\"\n")); err != nil {
+		t.Fatal(err)
+	}
+	var derived []string
+	for _, provider := range []string{"synthetic", "synthetic-infinite"} {
+		sum := sha256.Sum256([]byte("openai-compatibility:" + provider + "\x00" + key + "\x00https://api.synthetic.new/openai/v1\x00"))
+		authID := "openai-compatibility:" + provider + ":" + hex.EncodeToString(sum[:])[:12]
+		again := sha256.Sum256([]byte(authID))
+		derived = append(derived, authID, hex.EncodeToString(sum[:])[:6], hex.EncodeToString(again[:])[:6])
+		_ = c.HandleUsage(pluginapi.UsageRecord{AuthID: authID, Provider: "openai-compatible-" + provider, Alias: "synthetic/deepseek-v4.1-flash", Detail: pluginapi.UsageDetail{OutputTokens: 5}})
+	}
+	fingerprint := sha256.Sum256([]byte("synthetic-account\x00" + key))
+	derived = append(derived, hex.EncodeToString(fingerprint[:])[:6], key)
+	owned := strings.Join(c.OwnedAuthIDs("synthetic"), " ")
+	if !strings.Contains(owned, derived[0]) || !strings.Contains(owned, derived[3]) {
+		t.Fatalf("owned auth IDs %q do not match the host derivation %v; the probe would prove nothing", owned, derived)
+	}
+	body := string(c.HandleManagement(context.Background(), pluginapi.ManagementRequest{Method: http.MethodGet, Path: resourcePluginBasePath + resourceUsageDataPath, Query: url.Values{"range": {"1h"}}}).Body)
+	for _, value := range derived {
+		if strings.Contains(body, value) {
+			t.Fatalf("unauthenticated usage data contains credential-derived %q", value)
+		}
+	}
+	var data usagePageData
+	if err := json.Unmarshal([]byte(body), &data); err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{}
+	for _, lane := range data.Synthetic.Lanes {
+		names[lane.Name] = true
+	}
+	for _, total := range data.Usage.Totals {
+		names[total.Account] = true
+	}
+	if len(names) != 2 || !names["synthetic#1"] || !names["synthetic-infinite#1"] {
+		t.Fatalf("public lane names = %v, want synthetic#1 and synthetic-infinite#1", names)
 	}
 }
 

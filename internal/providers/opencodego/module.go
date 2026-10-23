@@ -122,7 +122,10 @@ func (realClock) Sleep(ctx context.Context, delay time.Duration) error {
 	}
 }
 
-var _ providermodule.Module = (*Module)(nil)
+var (
+	_ providermodule.Module          = (*Module)(nil)
+	_ providermodule.UsageAttributor = (*Module)(nil)
+)
 
 func NewModule() *Module { return &Module{} }
 
@@ -245,6 +248,15 @@ func (m *Module) Pick(_ context.Context, req pluginapi.SchedulerPickRequest) (pl
 	selected := candidates[int(account.cursor%uint64(len(candidates)))].ID
 	account.cursor++
 	return pluginapi.SchedulerPickResponse{Handled: true, AuthID: selected}, nil
+}
+
+// UsageAccount names the OpenCode Go account a usage record belongs to, for
+// the coordinator's usage ledger.
+func (m *Module) UsageAccount(record pluginapi.UsageRecord) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	name, _ := stateAccountByAuthID(m.state, record.AuthID)
+	return name
 }
 
 func (m *Module) HandleUsage(_ context.Context, record pluginapi.UsageRecord) error {

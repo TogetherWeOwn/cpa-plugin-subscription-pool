@@ -18,6 +18,7 @@ import (
 
 	"github.com/TogetherWeOwn/cpa-plugin-subscription-pool/internal/providermodule"
 	"github.com/TogetherWeOwn/cpa-plugin-subscription-pool/internal/securestore"
+	"github.com/TogetherWeOwn/cpa-plugin-subscription-pool/internal/usage"
 )
 
 // PluginID is this plugin's stable, host-facing identifier.
@@ -46,6 +47,14 @@ type Coordinator struct {
 	registry registry
 
 	reconfigures sync.WaitGroup
+	// usage counts handleUsage calls in progress; Shutdown waits for them
+	// before its final ledger flush, so no accepted record misses it.
+	usage sync.WaitGroup
+
+	// ledger counts every usage record a hosted module accepts, for the
+	// usage page; ledgerStore persists it under the plugin's auth dir.
+	ledger      *usage.Ledger
+	ledgerStore ledgerPersistence
 
 	now func() time.Time
 }
@@ -54,7 +63,7 @@ type Coordinator struct {
 // IDs must be unique; New panics on a duplicate, since that is a
 // programming error caught at construction, never a runtime input.
 func New(modules ...providermodule.Module) *Coordinator {
-	c := &Coordinator{now: func() time.Time { return time.Now().UTC() }}
+	c := &Coordinator{now: func() time.Time { return time.Now().UTC() }, ledger: usage.New()}
 	seen := make(map[string]struct{}, len(modules))
 	for _, module := range modules {
 		id := module.ID()
@@ -101,6 +110,7 @@ func (c *Coordinator) reconfigure(rawConfig []byte) error {
 	if err := securestore.EnsureEmptyProviderDir(pluginAuthDir); err != nil {
 		return c.recordError(err)
 	}
+	c.attachLedgerStore(pluginAuthDir)
 
 	c.mu.Lock()
 	if c.stopped {
@@ -217,6 +227,17 @@ func (c *Coordinator) pick(req pluginapi.SchedulerPickRequest) (pluginapi.Schedu
 // map to any hosted module is a silent no-op, matching the pre-coordinator
 // behavior of ignoring usage records belonging to other CPA providers.
 func (c *Coordinator) handleUsage(record pluginapi.UsageRecord) error {
+	// Register under the same lock Shutdown uses to set stopped, so no
+	// handler can start between Shutdown's drain and its final flush.
+	c.mu.RLock()
+	if c.stopped {
+		c.mu.RUnlock()
+		return nil
+	}
+	c.usage.Add(1)
+	c.mu.RUnlock()
+	defer c.usage.Done()
+
 	providerID := c.registry.providerFor(strings.TrimSpace(record.AuthID))
 	if providerID == "" {
 		providerID = c.usageClaimant(record)
@@ -226,7 +247,9 @@ func (c *Coordinator) handleUsage(record pluginapi.UsageRecord) error {
 	}
 	for _, entry := range c.modules {
 		if entry.id == providerID {
-			return entry.module.HandleUsage(context.Background(), record)
+			err := entry.module.HandleUsage(context.Background(), record)
+			c.recordUsage(entry, record)
+			return err
 		}
 	}
 	return nil
@@ -341,6 +364,8 @@ func (c *Coordinator) shutdown() error {
 	c.mu.Unlock()
 
 	c.reconfigures.Wait()
+	c.usage.Wait()
+	c.flushLedger()
 
 	var firstErr error
 	for _, entry := range c.modules {

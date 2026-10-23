@@ -6,14 +6,14 @@
       "name": "Subscription Pool",
       "description": "Neutral multi-provider subscription-pool coordinator for CLIProxyAPI, hosting quota-aware Z.AI Coding Plan, OpenCode Go and synthetic.new (including free infinite-mode fallback) account pooling.",
       "author": "TogetherWeOwn",
-      "version": "0.5.0",
+      "version": "0.6.0",
       "repository": "https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool",
       "homepage": "https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool",
       "license": "MIT",
       "platforms": ["linux-amd64"],
       "capabilities": ["scheduler", "usage", "management"],
       "release": {
-        "archive": "subscription-pool_0.5.0_linux_amd64.zip",
+        "archive": "subscription-pool_0.6.0_linux_amd64.zip",
         "checksums": "checksums.txt"
       },
       "tags": ["Z.AI", "GLM", "Coding Plan", "OpenCode Go", "synthetic.new", "quota", "pool"]

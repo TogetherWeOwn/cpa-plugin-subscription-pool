@@ -192,14 +192,18 @@ func TestManagementRegistrationRoutes(t *testing.T) {
 	if err := json.Unmarshal(envelope.Result, &routes); err != nil {
 		t.Fatal(err)
 	}
-	// The coordinator's own aggregated status route, plus the zai module's 4
-	// declared routes (status/refresh/unblock/account-config) = 5 total.
-	if len(routes.Routes) != 5 {
-		t.Fatalf("routes = %#v, want 5 routes (coordinator status + zai's 4)", routes.Routes)
+	// The coordinator's own aggregated status and usage routes, plus the zai
+	// module's 4 declared routes (status/refresh/unblock/account-config) = 6.
+	if len(routes.Routes) != 6 {
+		t.Fatalf("routes = %#v, want 6 routes (coordinator status + usage + zai's 4)", routes.Routes)
 	}
 	wantStatusPath := "/v0/management/plugins/" + pluginID + "/status"
 	if route := routes.Routes[0]; route.Method != "GET" || route.Path != wantStatusPath {
 		t.Fatalf("route = %#v, want GET %s", route, wantStatusPath)
+	}
+	wantUsagePath := "/v0/management/plugins/" + pluginID + "/usage"
+	if route := routes.Routes[1]; route.Method != "GET" || route.Path != wantUsagePath {
+		t.Fatalf("route = %#v, want GET %s", route, wantUsagePath)
 	}
 }
 
