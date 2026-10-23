@@ -1,12 +1,17 @@
 package usage
 
 import (
+	"encoding/json"
+	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 	"unicode/utf8"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+
+	"github.com/TogetherWeOwn/cpa-plugin-subscription-pool/internal/securestore"
 )
 
 var base = time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
@@ -222,5 +227,243 @@ func TestMarshalStateKeepsDirtyUntilMarkedSaved(t *testing.T) {
 	l.MarkSaved(generation)
 	if l.Dirty() {
 		t.Fatal("MarkSaved with the current generation must clear dirty")
+	}
+}
+
+// snapshot copies every bucket of both tiers, so persistence tests can
+// compare the restored ledger with the original exactly.
+func snapshot(l *Ledger) map[string]map[int64]map[Key]Counters {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := map[string]map[int64]map[Key]Counters{}
+	for name, t := range map[string]*tier{"fine": &l.fine, "coarse": &l.coarse} {
+		buckets := map[int64]map[Key]Counters{}
+		for start, rows := range t.buckets {
+			copied := map[Key]Counters{}
+			for key, row := range rows {
+				copied[key] = *row
+			}
+			buckets[start] = copied
+		}
+		out[name] = buckets
+	}
+	return out
+}
+
+func restore(t *testing.T, raw []byte, now time.Time) *Ledger {
+	t.Helper()
+	restored := New()
+	if err := restored.UnmarshalState(raw, now); err != nil {
+		t.Fatal(err)
+	}
+	return restored
+}
+
+// distinctCounters sets every Counters field to a distinct nonzero value
+// (offset+1, offset+2, ...), so a swapped or dropped column cannot cancel out.
+func distinctCounters(offset int64) Counters {
+	var c Counters
+	v := reflect.ValueOf(&c).Elem()
+	for i := 0; i < v.NumField(); i++ {
+		v.Field(i).SetInt(offset + int64(i) + 1)
+	}
+	return c
+}
+
+func TestCompactCountersRoundTripEveryFieldExactly(t *testing.T) {
+	full := distinctCounters(100)
+	if got := countersFrom(full.values()); got != full {
+		t.Fatalf("countersFrom(values()) = %+v, want %+v", got, full)
+	}
+	// Each field alone: the trailing-zero trim must keep its column.
+	fields := reflect.TypeOf(Counters{}).NumField()
+	for i := 0; i < fields; i++ {
+		var only Counters
+		reflect.ValueOf(&only).Elem().Field(i).SetInt(7)
+		if got := countersFrom(only.values()); got != only {
+			t.Fatalf("field %s alone round-trips as %+v", reflect.TypeOf(Counters{}).Field(i).Name, got)
+		}
+	}
+	if len((Counters{}).values()) != 0 {
+		t.Fatal("an all-zero row must encode as an empty value list")
+	}
+}
+
+func TestStateRoundTripRestoresBothTiersExactly(t *testing.T) {
+	l := New()
+	now := base.Add(30 * time.Minute)
+	// Recorded rows: success, 429, other 4xx and 5xx, in two buckets.
+	for i, status := range []int{0, 429, 404, 503} {
+		l.Record("synthetic", "synthetic#1", record(base.Add(time.Duration(i)*6*time.Minute), "glm-5.3", int64(30+i), status), now)
+	}
+	l.Record("zai", "zai-pro-1", record(base.Add(-3*time.Hour), "glm-5.3", 70, 0), now)
+	// Injected rows with every field distinct, different per tier, plus
+	// trailing-zero shapes.
+	l.mu.Lock()
+	l.fine.add(base.Add(20*time.Minute), Key{"opencode-go", "go-1", "kimi-k3"}, distinctCounters(1000))
+	l.coarse.add(base.Add(20*time.Minute), Key{"opencode-go", "go-1", "kimi-k3"}, distinctCounters(2000))
+	l.fine.add(base.Add(25*time.Minute), Key{"opencode-go", "go-1", "only-requests"}, Counters{Requests: 3})
+	l.coarse.add(base.Add(-2*24*time.Hour), Key{"opencode-go", "go-1", "trailing"}, Counters{Requests: 2, InputTokens: 5, GenTokens: 9})
+	l.mu.Unlock()
+
+	before := snapshot(l)
+	raw, err := l.MarshalState(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored := restore(t, raw, now)
+	if after := snapshot(restored); !reflect.DeepEqual(before, after) {
+		t.Fatalf("restored tiers differ:\nbefore %+v\nafter  %+v", before, after)
+	}
+	for _, rng := range Ranges {
+		want, got := l.Query(rng, now), restored.Query(rng, now)
+		if !reflect.DeepEqual(want.Totals, got.Totals) || !reflect.DeepEqual(want.Series, got.Series) || want.Records != got.Records || !want.Since.Equal(*got.Since) {
+			t.Fatalf("%s report differs after restore:\nbefore %+v\nafter  %+v", rng.ID, want, got)
+		}
+	}
+}
+
+func TestFullBucketWithOverflowRestoresExactly(t *testing.T) {
+	l := New()
+	now := base.Add(time.Minute)
+	for i := 0; i <= maxRowsPerBucket; i++ {
+		l.Record("opencode-go", "go-1", record(base, fmt.Sprintf("model-%03d", i), int64(10+i), 0), now)
+	}
+	before := l.Query(RangeByID("1h"), now)
+	if len(before.Totals) != maxRowsPerBucket+1 {
+		t.Fatalf("rows before save = %d, want %d models + overflow", len(before.Totals), maxRowsPerBucket)
+	}
+	raw, err := l.MarshalState(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after := restore(t, raw, now).Query(RangeByID("1h"), now)
+	if !reflect.DeepEqual(before.Totals, after.Totals) {
+		t.Fatalf("restore moved a tracked model into %s: %d rows before, %d after", OverflowLabel, len(before.Totals), len(after.Totals))
+	}
+}
+
+// hourlyDistinctLabels records models models per hour over the whole coarse
+// retention, each model name unique to its hour, as a flood of new model
+// IDs would.
+func hourlyDistinctLabels(l *Ledger, now time.Time, models int, label func(hour, model int) string) {
+	for hour := 0; hour < int(CoarseRetention/time.Hour); hour++ {
+		at := now.Add(-time.Duration(hour) * time.Hour)
+		for model := 0; model < models; model++ {
+			l.Record("synthetic", "synthetic#1", pluginapi.UsageRecord{
+				Alias: label(hour, model), RequestedAt: at, Latency: 20 * time.Second, TTFT: time.Second,
+				Detail: pluginapi.UsageDetail{InputTokens: 100, OutputTokens: 100},
+			}, now)
+		}
+	}
+}
+
+func TestRestoreKeepsRecentHistoryWhenEveryHourHasNewModels(t *testing.T) {
+	l := New()
+	now := base
+	hourlyDistinctLabels(l, now, maxRowsPerBucket, func(hour, model int) string {
+		return fmt.Sprintf("%s-%03d-%03d", strings.Repeat("m", 105), hour, model) // 113 bytes
+	})
+	raw, err := l.MarshalState(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) > maxStateBytes {
+		t.Fatalf("state = %d bytes, budget %d", len(raw), maxStateBytes)
+	}
+	restored := restore(t, raw, now)
+	for _, rng := range Ranges {
+		want, got := l.Query(rng, now), restored.Query(rng, now)
+		if len(want.Totals) == 0 || !reflect.DeepEqual(want.Totals, got.Totals) || got.CompleteFrom != nil {
+			t.Fatalf("%s after restore: %d rows (want %d), complete_from %v; the state fits, so nothing may be dropped", rng.ID, len(got.Totals), len(want.Totals), got.CompleteFrom)
+		}
+	}
+}
+
+func TestEscapedLabelsStayUnderTheStoreLimitAndKeepTheNewestHistory(t *testing.T) {
+	l := New()
+	now := base
+	// '<', '>', '&', U+2028 and control bytes each encode to six JSON bytes.
+	hourlyDistinctLabels(l, now, maxRowsPerBucket, func(hour, model int) string {
+		return strings.Repeat("<", 100) + "&> \x01" + fmt.Sprintf("%03d%03d", hour, model)
+	})
+	raw, err := l.MarshalState(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) > maxStateBytes {
+		t.Fatalf("state = %d bytes, over the %d-byte budget (store limit %d)", len(raw), maxStateBytes, 8<<20)
+	}
+	// Through the real store: the write must succeed and read back.
+	store, err := securestore.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	if err := store.WriteJSON("ledger.state", json.RawMessage(raw)); err != nil {
+		t.Fatalf("securestore rejected the state: %v", err)
+	}
+	var back json.RawMessage
+	if found, err := store.ReadJSONIfExists("ledger.state", &back); err != nil || !found {
+		t.Fatalf("read back = %v, %v", found, err)
+	}
+	restored := restore(t, back, now)
+	// The newest history (every fine bucket) survives exactly.
+	for _, id := range []string{"1h", "6h", "24h"} {
+		want, got := l.Query(RangeByID(id), now), restored.Query(RangeByID(id), now)
+		if len(want.Totals) == 0 || !reflect.DeepEqual(want.Totals, got.Totals) || got.CompleteFrom != nil {
+			t.Fatalf("%s after restore: %d rows (want %d), complete_from %v", id, len(got.Totals), len(want.Totals), got.CompleteFrom)
+		}
+	}
+	// The 7-day view lost its oldest hours and says so.
+	want, got := l.Query(RangeByID("7d"), now), restored.Query(RangeByID("7d"), now)
+	if got.CompleteFrom == nil || !got.CompleteFrom.After(got.From) || !got.CompleteFrom.Before(now.Add(-48*time.Hour)) {
+		t.Fatalf("7d complete_from = %v, want a time between %v and 48h ago", got.CompleteFrom, got.From)
+	}
+	step := time.Duration(got.StepSeconds) * time.Second
+	for i, start := range got.Buckets {
+		if start.Before(*got.CompleteFrom) {
+			continue
+		}
+		var wantSum, gotSum int64
+		for _, s := range want.Series {
+			wantSum += s.Requests[i]
+		}
+		for _, s := range got.Series {
+			gotSum += s.Requests[i]
+		}
+		if wantSum != gotSum {
+			t.Fatalf("7d bucket %v (step %v) after complete_from: %d requests restored, want %d", start, step, gotSum, wantSum)
+		}
+	}
+}
+
+func TestCoverageMarkerSurvivesTheNextSaveAndExpiresWithRetention(t *testing.T) {
+	now := base
+	cut := now.Add(-100 * time.Hour)
+	raw := fmt.Sprintf(`{"version":2,"records":1,"coarse_from":%d,"keys":[["zai","a","m"]],"fine":[],"coarse":[{"t":%d,"r":[[0,1]]}]}`, cut.Unix(), now.Add(-time.Hour).Unix())
+	l := restore(t, []byte(raw), now)
+	if got := l.Query(RangeByID("7d"), now).CompleteFrom; got == nil || !got.Equal(cut) {
+		t.Fatalf("7d complete_from = %v, want %v", got, cut)
+	}
+	if got := l.Query(RangeByID("24h"), now).CompleteFrom; got != nil {
+		t.Fatalf("24h complete_from = %v; the fine tier lost nothing", got)
+	}
+	// A save that drops nothing new still carries the earlier loss forward.
+	saved, err := l.MarshalState(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := restore(t, saved, now).Query(RangeByID("7d"), now).CompleteFrom; got == nil || !got.Equal(cut) {
+		t.Fatalf("complete_from after a second save = %v, want %v", got, cut)
+	}
+	// Once the coarse window starts after the cut, the history is complete.
+	later := cut.Add(CoarseRetention + time.Hour)
+	l.Record("zai", "a", record(later, "m", 1, 0), later)
+	if got := l.Query(RangeByID("7d"), later).CompleteFrom; got != nil {
+		t.Fatalf("complete_from = %v after the retention passed the cut", got)
+	}
+	if saved, _ := l.MarshalState(later); strings.Contains(string(saved), "coarse_from") {
+		t.Fatal("an expired coverage marker was saved again")
 	}
 }

@@ -223,17 +223,22 @@ type syntheticRegenAt struct {
 	RemainingPercent float64   `json:"remaining_percent"`
 }
 
+// ledgerInfo describes history persistence. PersistError is a closed code
+// (open_failed, read_failed, decode_failed, write_failed); PersistDetail,
+// the error text, is set on the authenticated management route only.
 type ledgerInfo struct {
 	Persisted     bool   `json:"persisted"`
 	PersistError  string `json:"persist_error,omitempty"`
+	PersistDetail string `json:"persist_error_detail,omitempty"`
 	FineStepSec   int64  `json:"fine_step_seconds"`
 	FineKeepSec   int64  `json:"fine_retention_seconds"`
 	CoarseStepSec int64  `json:"coarse_step_seconds"`
 	CoarseKeepSec int64  `json:"coarse_retention_seconds"`
 }
 
-// buildUsagePageData assembles the page payload for rangeID.
-func (c *Coordinator) buildUsagePageData(rangeID string) usagePageData {
+// buildUsagePageData assembles the page payload for rangeID. authenticated
+// adds the diagnostic free text only the management route may carry.
+func (c *Coordinator) buildUsagePageData(rangeID string, authenticated bool) usagePageData {
 	status := c.managementStatus()
 	now := status.GeneratedAt
 	rng := usage.RangeByID(rangeID)
@@ -266,9 +271,12 @@ func (c *Coordinator) buildUsagePageData(rangeID string) usagePageData {
 		data.Providers = append(data.Providers, usageProvider{ID: entry.id, Label: providerLabel(entry.id), Status: moduleStatusOf(raw), Accounts: len(cards)})
 		data.Quota = append(data.Quota, cards...)
 	}
-	persisted, persistErr := c.ledgerPersistenceStatus()
+	persisted, persistCode, persistDetail := c.ledgerPersistenceStatus()
+	if !authenticated {
+		persistDetail = ""
+	}
 	data.Ledger = ledgerInfo{
-		Persisted: persisted, PersistError: persistErr,
+		Persisted: persisted, PersistError: persistCode, PersistDetail: persistDetail,
 		FineStepSec: int64(usage.FineStep / time.Second), FineKeepSec: int64(usage.FineRetention / time.Second),
 		CoarseStepSec: int64(usage.CoarseStep / time.Second), CoarseKeepSec: int64(usage.CoarseRetention / time.Second),
 	}
@@ -540,9 +548,10 @@ func requestRange(req pluginapi.ManagementRequest) string {
 }
 
 // usageDataResponse answers usage.json (resource route, unauthenticated, so
-// redacted data only) and the authenticated management usage route.
-func (c *Coordinator) usageDataResponse(req pluginapi.ManagementRequest) pluginapi.ManagementResponse {
-	body, err := json.Marshal(c.buildUsagePageData(requestRange(req)))
+// redacted data only) and the authenticated management usage route, which
+// adds ledger.persist_error_detail.
+func (c *Coordinator) usageDataResponse(req pluginapi.ManagementRequest, authenticated bool) pluginapi.ManagementResponse {
+	body, err := json.Marshal(c.buildUsagePageData(requestRange(req), authenticated))
 	if err != nil {
 		return managementError(http.StatusInternalServerError, "encode_failed", "could not encode usage data")
 	}
@@ -570,7 +579,7 @@ func newNonce() string {
 // executed), and json.Marshal escapes <, > and & so it cannot close the
 // script element.
 func (c *Coordinator) usagePageResponse(req pluginapi.ManagementRequest) pluginapi.ManagementResponse {
-	data, err := json.Marshal(c.buildUsagePageData(requestRange(req)))
+	data, err := json.Marshal(c.buildUsagePageData(requestRange(req), false))
 	if err != nil {
 		return managementError(http.StatusInternalServerError, "encode_failed", "could not encode usage data")
 	}

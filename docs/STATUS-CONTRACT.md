@@ -168,14 +168,15 @@ producer contract and review would be needed to change that disposition.
 
 ## synthetic.new status
 
-`GET /v0/management/plugins/subscription-pool/status` -> `providers.synthetic` is a separate, additive shape. It never contains an API key; accounts are identified by a one-way `account` fingerprint and the host auth ID.
+`GET /v0/management/plugins/subscription-pool/status` -> `providers.synthetic` is a separate, additive shape. It never contains an API key; accounts are identified by a one-way `account` fingerprint and the host auth ID. Both are credential-derived pseudonyms (anyone holding a candidate key can recompute them), so they are restricted to this authenticated route: the unauthenticated usage page and `usage.json` carry only the lane `name`.
 
 | Field | Meaning |
 |---|---|
 | `status` | `registered`, `inactive` (no matching providers or `enabled: false`), or `reconfigure_rejected` with `validation_error` |
 | `threshold_percent`, `paid_providers`, `infinite_providers` | effective configuration |
 | `credential_bound` | `true` once any lane has a real key; placeholder keys report `false` |
-| `accounts[]` | one entry per lane (provider entry x api-key entry): `name` (`<provider>#<6 hex of the auth ID>`, stable when api-key entries are reordered; learned lanes `<provider>#learned-<8 hex>`), `provider`, `kind` (`paid` or `infinite`), `auth_id`, `account`, `learned` (credential seen at runtime but not in the last reconfigure), `credential_bound`, `health` (`healthy`, `throttled`, `exhausted`, `unbound`), `health_reason`, `in_flight`, `peak_in_flight` (highest in-flight count admitted since the module started) and `peak_in_flight_at`, `max_concurrent`, `last_poll_error` |
+| `lane_labels_error` | omitted normally; the last failure to read or save `lane-labels.state` (names then follow config order until a save succeeds) |
+| `accounts[]` | one entry per lane (provider entry x api-key entry): `name` (`<provider>#<ordinal>`, public, never credential-derived; the ordinal sticks to its credential through reorders and restarts via the server-side `lane-labels.state`, and a new credential takes the provider's lowest free ordinal; learned lanes `<provider>#learned-<n>`), `provider`, `kind` (`paid` or `infinite`), `auth_id`, `account`, `learned` (credential seen at runtime but not in the last reconfigure), `credential_bound`, `health` (`healthy`, `throttled`, `exhausted`, `unbound`), `health_reason`, `in_flight`, `peak_in_flight` (highest in-flight count admitted since the module started) and `peak_in_flight_at`, `max_concurrent`, `last_poll_error` |
 | `accounts[].windows.weekly` | `known`, `utilization` (0-1, projected through regeneration ticks since the last reading), `exhausted`, `resets_at` (the next 2% regeneration tick, not a full reset), `source`, `authoritative` (true for `/v2/quotas` polls). Infinite lanes report `utilization: 0` with source `infinite mode (free, not metered)` |
 | `accounts[].next_regen_percent` | percent of the weekly limit returned at `resets_at` |
 | `accounts[].stats` | `requests`, `failures`, `output_tokens`, `tps_samples`, `mean_output_tps`, `median_output_tps` (output tokens / (latency - time to first token), responses with at least 20 output tokens, last 200), `mean_ttft_ms`, `last_status` |

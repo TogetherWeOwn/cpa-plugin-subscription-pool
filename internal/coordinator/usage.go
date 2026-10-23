@@ -29,8 +29,17 @@ type ledgerPersistence struct {
 	loaded  bool
 	saving  bool
 	savedAt time.Time
-	lastErr string
-	wg      sync.WaitGroup
+	// lastCode is the closed-vocabulary failure the public page shows
+	// (open_failed, read_failed, decode_failed, write_failed); lastErr is
+	// its text, which can carry paths and goes to the authenticated route
+	// only.
+	lastCode string
+	lastErr  string
+	wg       sync.WaitGroup
+}
+
+func (p *ledgerPersistence) failLocked(code string, err error) {
+	p.lastCode, p.lastErr = code, err.Error()
 }
 
 // attachLedgerStore points persistence at pluginAuthDir/usage and loads the
@@ -46,21 +55,21 @@ func (c *Coordinator) attachLedgerStore(pluginAuthDir string) {
 	p.loaded = true
 	store, err := securestore.New(p.dir)
 	if err != nil {
-		p.lastErr = "open: " + err.Error()
+		p.failLocked("open_failed", err)
 		return
 	}
 	defer func() { _ = store.Close() }()
 	var raw rawState
 	found, err := store.ReadJSONIfExists(ledgerStateName, &raw)
 	if err != nil {
-		p.lastErr = "read: " + err.Error()
+		p.failLocked("read_failed", err)
 		return
 	}
 	if !found {
 		return
 	}
 	if err := c.ledger.UnmarshalState(raw, c.runtimeNow()); err != nil {
-		p.lastErr = "decode: " + err.Error()
+		p.failLocked("decode_failed", err)
 	}
 }
 
@@ -115,9 +124,9 @@ func (c *Coordinator) maybeSaveLedger(now time.Time, force bool) {
 		p.mu.Lock()
 		p.saving = false
 		if err != nil {
-			p.lastErr = "write: " + err.Error()
+			p.failLocked("write_failed", err)
 		} else {
-			p.lastErr = ""
+			p.lastCode, p.lastErr = "", ""
 		}
 		p.mu.Unlock()
 	}
@@ -155,9 +164,9 @@ func (c *Coordinator) flushLedger() {
 	c.ledgerStore.wg.Wait()
 }
 
-func (c *Coordinator) ledgerPersistenceStatus() (persisted bool, lastErr string) {
+func (c *Coordinator) ledgerPersistenceStatus() (persisted bool, code, detail string) {
 	p := &c.ledgerStore
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.dir != "" && p.lastErr == "", p.lastErr
+	return p.dir != "" && p.lastCode == "", p.lastCode, p.lastErr
 }

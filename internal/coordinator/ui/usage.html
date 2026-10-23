@@ -368,6 +368,7 @@ ul.notes{margin:0;padding-left:18px;font-size:12px;color:var(--text-tertiary)}
     other: 'Unavailable; see the authenticated status route'
   };
   var SOURCES = { authoritative: 'authoritative', quota_poll: 'quota poll', response_header: 'response header', '429_derived': '429-derived', estimate: 'estimate', free: 'free, not metered', observed: 'observed', unknown: 'unknown' };
+  var PERSIST = { open_failed: 'store unavailable', read_failed: 'saved history unreadable', decode_failed: 'saved history invalid', write_failed: 'last save failed' };
   function reasonText(code) { return code ? (REASONS[code] || REASONS.other) : ''; }
   function sourceText(code) { return SOURCES[code] || 'unknown'; }
   var state = {
@@ -656,7 +657,8 @@ ul.notes{margin:0;padding-left:18px;font-size:12px;color:var(--text-tertiary)}
   function renderChart(d, sums) {
     var sw = stepWords(d.usage.step_seconds), n = d.usage.buckets.length;
     $('traffic-title').textContent = 'Throughput, ' + sw.phrase + ' at a time';
-    $('traffic-sub').textContent = (state.metric === 'requests' ? 'Success and failure counts' : 'Input and output tokens') + ' per ' + sw.n + ' bucket across the last ' + RANGE_LABEL[d.usage.range] + '. Hover a column for its exact split.';
+    $('traffic-sub').textContent = (state.metric === 'requests' ? 'Success and failure counts' : 'Input and output tokens') + ' per ' + sw.n + ' bucket across the last ' + RANGE_LABEL[d.usage.range] + '. Hover a column for its exact split.' +
+      (d.usage.complete_from ? ' History before ' + absTime(d.usage.complete_from) + ' was trimmed to fit the saved-history limit, so earlier buckets undercount.' : '');
     var lower = state.metric === 'requests' ? sums.requests.map(function (v, i) { return v - sums.failures[i]; }) : sums.input;
     var upper = state.metric === 'requests' ? sums.failures : sums.output;
     var names = state.metric === 'requests' ? ['Success', 'Failure'] : ['Input', 'Output'];
@@ -1016,7 +1018,9 @@ ul.notes{margin:0;padding-left:18px;font-size:12px;color:var(--text-tertiary)}
   function renderFoot(d) {
     var f = clear($('foot'));
     var since = d.usage.since ? 'history since ' + absTime(d.usage.since) : 'no usage recorded yet';
-    f.appendChild(el('span', 'mono', 'Generated ' + absTime(d.generated_at) + ' · ' + since + ' · ' + (d.ledger.persisted ? 'history saved to disk every 5 min' : 'history in memory only' + (d.ledger.persist_error ? ' (' + d.ledger.persist_error + ')' : ''))));
+    var persist = d.ledger.persisted ? 'history saved to disk every 5 min' : 'history in memory only' + (d.ledger.persist_error ? ' (' + (PERSIST[d.ledger.persist_error] || 'save failed') + '; details on the authenticated usage route)' : '');
+    if (d.usage.complete_from) persist += ' · complete from ' + absTime(d.usage.complete_from);
+    f.appendChild(el('span', 'mono', 'Generated ' + absTime(d.generated_at) + ' · ' + since + ' · ' + persist));
     var a = el('a', 'mono', 'usage.json'); a.href = 'usage.json?range=' + encodeURIComponent(state.range); f.appendChild(a);
   }
 

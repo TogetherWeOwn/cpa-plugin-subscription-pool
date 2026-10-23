@@ -98,13 +98,13 @@ func (c *Coordinator) handleManagement(ctx context.Context, req pluginapi.Manage
 		return managementJSON(http.StatusOK, c.managementStatus())
 	}
 	if req.Method == http.MethodGet && req.Path == managementUsagePath {
-		return c.usageDataResponse(req)
+		return c.usageDataResponse(req, true)
 	}
 	if req.Method == http.MethodGet && isResourceStatusPath(req.Path) {
 		return c.usagePageResponse(req)
 	}
 	if req.Method == http.MethodGet && isResourceUsageDataPath(req.Path) {
-		return c.usageDataResponse(req)
+		return c.usageDataResponse(req, false)
 	}
 	for _, entry := range c.modules {
 		capable, ok := entry.module.(providermodule.ManagementCapable)

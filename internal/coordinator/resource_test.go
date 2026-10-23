@@ -8,12 +8,15 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+
+	"github.com/TogetherWeOwn/cpa-plugin-subscription-pool/internal/usage"
 )
 
 // fakeStatusModule is a fakeModule that returns a fixed Status() payload and
@@ -367,17 +370,42 @@ func TestUsageLedgerPersistsAcrossRestart(t *testing.T) {
 	}
 }
 
-func TestUsageAfterShutdownStartsNoBackgroundSave(t *testing.T) {
+func TestUsageAfterShutdownIsNotAdmitted(t *testing.T) {
 	dir := t.TempDir()
 	c := pageCoordinator(t)
 	c.attachLedgerStore(dir)
+	syn := c.modules[2].module.(*fakeStatusModule)
+	_ = c.handleUsage(usageRecord(hiddenPaidLaneRef, "synthetic/glm-5.3", pageNow.Add(-time.Minute), 10, 0))
 	if err := c.Shutdown(); err != nil {
 		t.Fatal(err)
 	}
+	callsBefore := len(syn.usageCalls)
+	before := c.ledger.Query(usage.RangeByID("1h"), pageNow)
+	if callsBefore != 1 || before.Records != 1 {
+		t.Fatalf("before shutdown: %d module calls, %d records; want 1 and 1", callsBefore, before.Records)
+	}
+
 	_ = c.handleUsage(usageRecord(hiddenPaidLaneRef, "synthetic/glm-5.3", pageNow, 10, 0))
 	c.ledgerStore.wg.Wait()
-	if _, err := os.Stat(filepath.Join(dir, ledgerSubdir, ledgerStateName)); !os.IsNotExist(err) {
-		t.Fatalf("a usage record after shutdown wrote the ledger (stat err = %v)", err)
+	// Rejected at admission: the closed module is never called and the
+	// ledger the final flush saved is unchanged, independent of the
+	// downstream no-save check.
+	if got := len(syn.usageCalls); got != callsBefore {
+		t.Fatalf("module HandleUsage called %d times after shutdown, want %d", got, callsBefore)
+	}
+	if after := c.ledger.Query(usage.RangeByID("1h"), pageNow); !reflect.DeepEqual(before, after) || c.ledger.Dirty() {
+		t.Fatalf("ledger changed after shutdown:\nbefore %+v\nafter  %+v (dirty %v)", before, after, c.ledger.Dirty())
+	}
+	saved, err := os.ReadFile(filepath.Join(dir, ledgerSubdir, ledgerStateName))
+	if err != nil {
+		t.Fatalf("shutdown flush wrote nothing: %v", err)
+	}
+	restored := New(&fakeModule{id: "synthetic"})
+	if err := restored.ledger.UnmarshalState(saved, pageNow); err != nil {
+		t.Fatal(err)
+	}
+	if got := restored.ledger.Query(usage.RangeByID("1h"), pageNow); got.Records != 1 || len(got.Totals) != 1 || got.Totals[0].Requests != 1 {
+		t.Fatalf("saved ledger = %+v, want only the record handled before shutdown", got)
 	}
 }
 
@@ -395,8 +423,21 @@ func TestFailedLedgerSaveIsRetriedByTheShutdownFlush(t *testing.T) {
 	}
 	_ = c.handleUsage(usageRecord(hiddenPaidLaneRef, "synthetic/glm-5.3", pageNow, 10, 0))
 	c.ledgerStore.wg.Wait()
-	if _, lastErr := c.ledgerPersistenceStatus(); lastErr == "" {
-		t.Fatal("the broken store did not report a save error")
+	// The public payload carries a closed code, never the error text (an
+	// absolute path); the authenticated route adds the detail.
+	public := get(c, resourceUsageDataPath, nil).Body
+	var data usagePageData
+	if err := json.Unmarshal(public, &data); err != nil {
+		t.Fatal(err)
+	}
+	if data.Ledger.Persisted || data.Ledger.PersistError != "write_failed" || data.Ledger.PersistDetail != "" || strings.Contains(string(public), dir) {
+		t.Fatalf("public ledger info = %+v (body leaks the path: %v)", data.Ledger, strings.Contains(string(public), dir))
+	}
+	if err := json.Unmarshal(get(c, managementUsagePath, nil).Body, &data); err != nil {
+		t.Fatal(err)
+	}
+	if data.Ledger.PersistError != "write_failed" || !strings.Contains(data.Ledger.PersistDetail, "not a directory") {
+		t.Fatalf("authenticated ledger info = %+v, want the code and the detail", data.Ledger)
 	}
 	// Repair the disk; the flush must write what the failed save could not.
 	if err := os.Remove(usageDir); err != nil {
@@ -453,5 +494,109 @@ func TestShutdownWaitsForInFlightUsageBeforeTheFinalFlush(t *testing.T) {
 	}
 	if len(data.Usage.Totals) != 1 || data.Usage.Totals[0].Account != "lane-a" {
 		t.Fatalf("persisted usage after shutdown = %+v, want the record handled during shutdown", data.Usage.Totals)
+	}
+}
+
+func TestReasonAndSourceCodesAreAClosedVocabulary(t *testing.T) {
+	reasons := map[string]string{
+		"":    "",
+		"   ": "",
+		"exhausted until 2026-10-23T16:00:00Z: " + freeTextMarker:   "quota_exhausted",
+		"weekly credits 96.0% used, at or above the 95% threshold":  "at_threshold",
+		"paid concurrency cap 4 reached":                            "concurrency_cap",
+		"infinite concurrency cap 1 reached":                        "concurrency_cap",
+		"busy until 2026-10-23T15:10:00Z: " + freeTextMarker:        "resting",
+		"credential not bound to a known account " + freeTextMarker: "unbound_credential",
+		"no API key yet (placeholder): " + freeTextMarker:           "placeholder_key",
+		"upstream said " + freeTextMarker:                           "other",
+		freeTextMarker:                                              "other",
+	}
+	for text, want := range reasons {
+		if got := reasonCode(text); got != want {
+			t.Fatalf("reasonCode(%q) = %q, want %q", text, got, want)
+		}
+	}
+	type source struct {
+		raw           string
+		authoritative bool
+	}
+	sources := map[source]string{
+		{freeTextMarker, true}:                              "authoritative",
+		{"quota_api", false}:                                "authoritative",
+		{"authoritative", false}:                            "authoritative",
+		{"estimate", false}:                                 "estimate",
+		{"quota poll (" + freeTextMarker + ")", false}:      "quota_poll",
+		{"response header (" + freeTextMarker + ")", false}: "response_header",
+		{"proxy-observed 429 " + freeTextMarker, false}:     "429_derived",
+		{"429-derived", false}:                              "429_derived",
+		{"infinite mode (free, not metered)", false}:        "free",
+		{"", false}:        "unknown",
+		{"unknown", false}: "unknown",
+		{"dashboard scrape " + freeTextMarker, false}: "observed",
+		{freeTextMarker, false}:                       "observed",
+	}
+	for in, want := range sources {
+		if got := sourceCode(in.raw, in.authoritative); got != want {
+			t.Fatalf("sourceCode(%q, %v) = %q, want %q", in.raw, in.authoritative, got, want)
+		}
+	}
+}
+
+// TestUnrecognizedReasonsAndSourcesNeverReachThePublicPage feeds every
+// public reason and source field a text no vocabulary branch recognizes:
+// each must arrive as the fallback code, on both public payload forms.
+func TestUnrecognizedReasonsAndSourcesNeverReachThePublicPage(t *testing.T) {
+	unknown := "upstream said " + freeTextMarker
+	zaiStatus := mustJSON(t, map[string]any{"accounts": []map[string]any{{
+		"name": "zai-pro-1", "plan": "pro", "health": "healthy", "five_hour_utilization": 0.5, "weekly_utilization": 0.1,
+		"five_hour_resets_at": pageNow.Add(time.Hour), "weekly_resets_at": pageNow.Add(48 * time.Hour), "quota_source": unknown,
+	}}})
+	opencodeStatus := mustJSON(t, map[string]any{"status": "registered", "accounts": []map[string]any{{
+		"name":    "go-1",
+		"windows": map[string]any{"weekly": map[string]any{"known": true, "utilization": 0.2, "resets_at": pageNow.Add(time.Hour), "source": unknown, "authoritative": false}},
+	}}})
+	syntheticStatus := mustJSON(t, map[string]any{
+		"status": "registered", "threshold_percent": 95,
+		"accounts": []map[string]any{{
+			"name": "synthetic#1", "provider": "synthetic", "kind": "paid", "health": "throttled", "health_reason": unknown,
+			"windows": map[string]any{"weekly": map[string]any{"known": true, "utilization": 0.3, "resets_at": pageNow.Add(time.Hour), "source": unknown}},
+		}},
+		"routing": map[string]any{"fallbacks_to_infinite": 1, "last_fallback_reason": unknown, "last_fallback_at": pageNow},
+	})
+	c := New(
+		&fakeStatusModule{fakeModule: fakeModule{id: "zai"}, status: zaiStatus},
+		&fakeStatusModule{fakeModule: fakeModule{id: "opencode-go"}, status: opencodeStatus},
+		&fakeStatusModule{fakeModule: fakeModule{id: "synthetic"}, status: syntheticStatus},
+	)
+	c.now = func() time.Time { return pageNow }
+
+	jsonBody := string(get(c, resourcePluginBasePath+resourceUsageDataPath, nil).Body)
+	page := string(get(c, resourcePluginBasePath+resourceStatusPath, nil).Body)
+	start := strings.Index(page, `<script type="application/json" id="sp-data">`)
+	if start < 0 {
+		t.Fatal("page has no initial data element")
+	}
+	start += len(`<script type="application/json" id="sp-data">`)
+	embedded := page[start : start+strings.Index(page[start:], "</script>")]
+	for form, body := range map[string]string{"usage.json": jsonBody, "page": page} {
+		if strings.Contains(body, freeTextMarker) || strings.Contains(body, "upstream said") {
+			t.Fatalf("%s carries unrecognized free text", form)
+		}
+	}
+	for form, body := range map[string]string{"usage.json": jsonBody, "page data": embedded} {
+		var data usagePageData
+		if err := json.Unmarshal([]byte(body), &data); err != nil {
+			t.Fatalf("%s: %v", form, err)
+		}
+		if len(data.Quota) != 3 || data.Synthetic == nil || len(data.Synthetic.Lanes) != 1 {
+			t.Fatalf("%s: quota %+v, synthetic %+v", form, data.Quota, data.Synthetic)
+		}
+		zai, goCard, paid := data.Quota[0], data.Quota[1], data.Quota[2]
+		if zai.Windows[0].Source != "observed" || zai.Windows[1].Source != "observed" || goCard.Windows[1].Source != "observed" || paid.Windows[0].Source != "observed" {
+			t.Fatalf("%s sources = %q %q %q %q, want observed", form, zai.Windows[0].Source, zai.Windows[1].Source, goCard.Windows[1].Source, paid.Windows[0].Source)
+		}
+		if paid.Reason != "other" || data.Synthetic.Lanes[0].Reason != "other" || data.Synthetic.Routing.LastFallbackReason != "other" {
+			t.Fatalf("%s reasons = %q %q %q, want other", form, paid.Reason, data.Synthetic.Lanes[0].Reason, data.Synthetic.Routing.LastFallbackReason)
+		}
 	}
 }

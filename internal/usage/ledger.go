@@ -4,17 +4,19 @@
 //
 // Two tiers bound memory and disk: 5-minute buckets for the last 48 hours
 // and 1-hour buckets for the last 8 days. Each bucket holds at most
-// maxRowsPerBucket rows; anything past that is folded into one overflow row
-// per provider, so a flood of distinct model names cannot grow the ledger
-// without limit. The ledger stores no credential, auth ID, client key or
-// request content: only provider IDs, account display names, model names,
-// counters and durations.
+// maxRowsPerBucket ordinary rows; anything past that is folded into one
+// reserved overflow row per provider, so a flood of distinct model names
+// cannot grow the ledger without limit. The ledger stores no credential,
+// auth ID, client key or request content: only provider IDs, account
+// display names, model names, counters and durations.
 package usage
 
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -33,7 +35,7 @@ const (
 
 	maxRowsPerBucket = 100
 	maxLabel         = 120
-	// maxStateBytes bounds the persisted ledger well under securestore's
+	// maxStateBytes bounds the encoded ledger well under securestore's
 	// 8 MiB file limit; MarshalState drops the oldest buckets to fit.
 	maxStateBytes = 6 << 20
 	// OverflowLabel names the row that absorbs keys past maxRowsPerBucket.
@@ -154,6 +156,14 @@ func newTier(step, retention time.Duration) tier {
 	return tier{step: step, retention: retention, buckets: make(map[int64]map[Key]*Counters)}
 }
 
+func overflowKey(provider string) Key {
+	return Key{Provider: provider, Account: OverflowLabel, Model: OverflowLabel}
+}
+
+func isOverflow(key Key) bool {
+	return key.Account == OverflowLabel && key.Model == OverflowLabel
+}
+
 func (t *tier) add(at time.Time, key Key, delta Counters) {
 	start := at.Truncate(t.step).Unix()
 	rows := t.buckets[start]
@@ -163,8 +173,11 @@ func (t *tier) add(at time.Time, key Key, delta Counters) {
 	}
 	row := rows[key]
 	if row == nil {
-		if len(rows) >= maxRowsPerBucket {
-			key = Key{Provider: key.Provider, Account: OverflowLabel, Model: OverflowLabel}
+		// Overflow rows are reserved and never take one of the
+		// maxRowsPerBucket ordinary slots, so restoring a full bucket (whose
+		// overflow row sorts first) keeps every key it tracked.
+		if !isOverflow(key) && ordinaryRows(rows) >= maxRowsPerBucket {
+			key = overflowKey(key.Provider)
 			row = rows[key]
 		}
 		if row == nil {
@@ -175,8 +188,26 @@ func (t *tier) add(at time.Time, key Key, delta Counters) {
 	row.Add(delta)
 }
 
+func ordinaryRows(rows map[Key]*Counters) int {
+	count := len(rows)
+	if count < maxRowsPerBucket {
+		return count
+	}
+	for key := range rows {
+		if isOverflow(key) {
+			count--
+		}
+	}
+	return count
+}
+
+// oldest is the start of the oldest bucket the tier retains at now.
+func (t *tier) oldest(now time.Time) time.Time {
+	return now.Add(-t.retention).Truncate(t.step)
+}
+
 func (t *tier) prune(now time.Time) {
-	oldest := now.Add(-t.retention).Truncate(t.step).Unix()
+	oldest := t.oldest(now).Unix()
 	for start := range t.buckets {
 		if start < oldest {
 			delete(t.buckets, start)
@@ -195,6 +226,11 @@ type Ledger struct {
 	// generation counts changes, so a save can clear dirty only when no
 	// record arrived between its marshal and its successful write.
 	generation uint64
+	// fineFrom and coarseFrom are set when a restored state had dropped
+	// that tier's older buckets to fit the store: the tier's history is
+	// complete only from that instant. Zero means complete.
+	fineFrom   time.Time
+	coarseFrom time.Time
 }
 
 // New returns an empty ledger.
@@ -233,8 +269,20 @@ func (l *Ledger) Record(provider, account string, record pluginapi.UsageRecord, 
 	l.records++
 	l.dirty = true
 	l.generation++
+	l.pruneLocked(now)
+}
+
+// pruneLocked drops buckets past each tier's retention, and a coverage
+// marker once every retained bucket is newer than it.
+func (l *Ledger) pruneLocked(now time.Time) {
 	l.fine.prune(now)
 	l.coarse.prune(now)
+	if !l.fineFrom.IsZero() && !l.fineFrom.After(l.fine.oldest(now)) {
+		l.fineFrom = time.Time{}
+	}
+	if !l.coarseFrom.IsZero() && !l.coarseFrom.After(l.coarse.oldest(now)) {
+		l.coarseFrom = time.Time{}
+	}
 }
 
 func clean(value, fallback string) string {
@@ -320,6 +368,11 @@ type Report struct {
 	Totals      []Total     `json:"totals"`
 	Since       *time.Time  `json:"since,omitempty"`
 	Records     int64       `json:"records_since_start"`
+	// CompleteFrom is set when this range starts before the point from
+	// which the ledger's history is complete: an earlier save had to drop
+	// older buckets to stay under the store limit, so buckets before
+	// CompleteFrom undercount.
+	CompleteFrom *time.Time `json:"complete_from,omitempty"`
 }
 
 // Query aggregates the ledger over rng ending at now. The returned buckets
@@ -347,9 +400,13 @@ func (l *Ledger) Query(rng Range, now time.Time) Report {
 	}
 
 	l.mu.Lock()
-	source := &l.coarse
+	source, completeFrom := &l.coarse, l.coarseFrom
 	if rng.Duration <= FineRetention && step%FineStep == 0 {
-		source = &l.fine
+		source, completeFrom = &l.fine, l.fineFrom
+	}
+	if completeFrom.After(first) {
+		value := completeFrom
+		report.CompleteFrom = &value
 	}
 	series := make(map[Key]*Series)
 	totals := make(map[Key]*Counters)
@@ -408,15 +465,19 @@ func (l *Ledger) Query(rng Range, now time.Time) Report {
 }
 
 // persisted is the on-disk shape (version 2). Labels are stored once in
-// Keys; each row is [key index, counters...] in counterOrder with trailing
-// zeros trimmed, which keeps a full ledger to a few MiB.
+// Keys; each row is [key index, counters...] in values() order with
+// trailing zeros trimmed, which keeps a full ledger to a few MiB. FineFrom
+// and CoarseFrom (Unix seconds) mark where each tier's history becomes
+// complete when older buckets had to be dropped.
 type persisted struct {
-	Version int             `json:"version"`
-	Since   *time.Time      `json:"since,omitempty"`
-	Records int64           `json:"records"`
-	Keys    [][3]string     `json:"keys"`
-	Fine    []persistBucket `json:"fine"`
-	Coarse  []persistBucket `json:"coarse"`
+	Version    int             `json:"version"`
+	Since      *time.Time      `json:"since,omitempty"`
+	Records    int64           `json:"records"`
+	FineFrom   int64           `json:"fine_from,omitempty"`
+	CoarseFrom int64           `json:"coarse_from,omitempty"`
+	Keys       [][3]string     `json:"keys"`
+	Fine       []persistBucket `json:"fine"`
+	Coarse     []persistBucket `json:"coarse"`
 }
 
 type persistBucket struct {
@@ -460,57 +521,134 @@ func (l *Ledger) MarshalState(now time.Time) ([]byte, error) {
 }
 
 // MarshalStateGeneration serializes the ledger and returns the generation it
-// captured; pass it to MarkSaved once the bytes are durably written. The
-// state is kept under maxStateBytes: every coarse bucket is kept first
-// (newest first), then fine buckets newest first, so dropping only ever
-// loses the oldest detail, never recent totals.
+// captured; pass it to MarkSaved once the bytes are durably written.
+//
+// The encoded state stays under maxStateBytes. Every byte is counted as
+// encoding/json writes it (escaped labels, exact digits), and buckets of
+// both tiers are kept newest first, so trimming only ever drops the oldest
+// history: the 1h, 6h and 24h views keep their newest fine buckets before
+// any older coarse bucket. Where a tier lost buckets, the state records the
+// instant its history is complete from, and Query reports it.
 func (l *Ledger) MarshalStateGeneration(now time.Time) ([]byte, uint64, error) {
 	l.mu.Lock()
-	l.fine.prune(now)
-	l.coarse.prune(now)
+	l.pruneLocked(now)
 	state := persisted{Version: stateVersion, Records: l.records, Keys: [][3]string{}, Fine: []persistBucket{}, Coarse: []persistBucket{}}
 	if !l.since.IsZero() {
 		since := l.since
 		state.Since = &since
 	}
-	index := make(map[Key]int64)
-	budget := maxStateBytes - 512
-	keep := func(t tier) []persistBucket {
-		var out []persistBucket
-		for _, start := range sortedStarts(t, true) {
-			rows := t.buckets[start]
-			bucket := persistBucket{Start: start, Rows: make([][]int64, 0, len(rows))}
-			cost := 24
-			var added [][3]string
-			for _, key := range sortedKeys(rows) {
-				id, ok := index[key]
-				if !ok {
-					id = int64(len(state.Keys) + len(added))
-					added = append(added, [3]string{key.Provider, key.Account, key.Model})
-					cost += len(key.Provider) + len(key.Account) + len(key.Model) + 12
-				}
-				row := append([]int64{id}, rows[key].values()...)
-				bucket.Rows = append(bucket.Rows, row)
-				cost += 2 + len(row)*12
-			}
-			if cost > budget {
-				break
-			}
-			budget -= cost
-			for _, key := range added {
-				index[Key{Provider: key[0], Account: key[1], Model: key[2]}] = int64(len(state.Keys))
-				state.Keys = append(state.Keys, key)
-			}
-			out = append(out, bucket)
-		}
-		return out
+	// The header with empty arrays and the widest possible markers: each
+	// kept key, bucket and row then adds its own bytes plus one comma.
+	widest := state
+	widest.FineFrom, widest.CoarseFrom = math.MaxInt64, math.MaxInt64
+	header, err := json.Marshal(widest)
+	if err != nil {
+		l.mu.Unlock()
+		return nil, 0, err
 	}
-	state.Coarse = keep(l.coarse)
-	state.Fine = keep(l.fine)
+	budget := maxStateBytes - len(header)
+
+	type candidate struct {
+		fine  bool
+		start int64
+	}
+	order := make([]candidate, 0, len(l.fine.buckets)+len(l.coarse.buckets))
+	for start := range l.fine.buckets {
+		order = append(order, candidate{fine: true, start: start})
+	}
+	for start := range l.coarse.buckets {
+		order = append(order, candidate{start: start})
+	}
+	sort.Slice(order, func(i, j int) bool {
+		if order[i].start != order[j].start {
+			return order[i].start > order[j].start
+		}
+		return order[i].fine && !order[j].fine
+	})
+
+	index := make(map[Key]int64)
+	var digits []byte
+	numberLen := func(value int64) int {
+		digits = strconv.AppendInt(digits[:0], value, 10)
+		return len(digits)
+	}
+	kept := 0
+	for ; kept < len(order); kept++ {
+		item := order[kept]
+		rows := l.coarse.buckets[item.start]
+		if item.fine {
+			rows = l.fine.buckets[item.start]
+		}
+		bucket := persistBucket{Start: item.start, Rows: make([][]int64, 0, len(rows))}
+		cost := len(`{"t":,"r":[]},`) + numberLen(item.start)
+		var added [][3]string
+		for _, key := range sortedKeys(rows) {
+			id, ok := index[key]
+			if !ok {
+				id = int64(len(state.Keys) + len(added))
+				label := [3]string{key.Provider, key.Account, key.Model}
+				encoded, errKey := json.Marshal(label)
+				if errKey != nil {
+					l.mu.Unlock()
+					return nil, 0, errKey
+				}
+				added = append(added, label)
+				cost += len(encoded) + 1
+			}
+			row := append([]int64{id}, rows[key].values()...)
+			bucket.Rows = append(bucket.Rows, row)
+			cost += len("[],") + len(row) - 1
+			for _, value := range row {
+				cost += numberLen(value)
+			}
+		}
+		if cost > budget {
+			break
+		}
+		budget -= cost
+		for _, label := range added {
+			index[Key{Provider: label[0], Account: label[1], Model: label[2]}] = int64(len(state.Keys))
+			state.Keys = append(state.Keys, label)
+		}
+		if item.fine {
+			state.Fine = append(state.Fine, bucket)
+		} else {
+			state.Coarse = append(state.Coarse, bucket)
+		}
+	}
+	// Everything newer than a tier's newest dropped bucket was kept.
+	fineFrom, coarseFrom := l.fineFrom, l.coarseFrom
+	var fineCut, coarseCut bool
+	for _, item := range order[kept:] {
+		switch {
+		case item.fine && !fineCut:
+			fineCut = true
+			fineFrom = later(fineFrom, time.Unix(item.start, 0).Add(FineStep))
+		case !item.fine && !coarseCut:
+			coarseCut = true
+			coarseFrom = later(coarseFrom, time.Unix(item.start, 0).Add(CoarseStep))
+		}
+	}
+	if !fineFrom.IsZero() {
+		state.FineFrom = fineFrom.Unix()
+	}
+	if !coarseFrom.IsZero() {
+		state.CoarseFrom = coarseFrom.Unix()
+	}
 	generation := l.generation
 	l.mu.Unlock()
 	raw, err := json.Marshal(state)
+	if err == nil && len(raw) > maxStateBytes {
+		err = fmt.Errorf("usage ledger state: encoded %d bytes, over the %d-byte budget", len(raw), maxStateBytes)
+	}
 	return raw, generation, err
+}
+
+func later(a, b time.Time) time.Time {
+	if b.After(a) {
+		return b.UTC()
+	}
+	return a
 }
 
 // MarkSaved clears the dirty flag if nothing changed since the marshal that
@@ -521,20 +659,6 @@ func (l *Ledger) MarkSaved(generation uint64) {
 	if l.generation == generation {
 		l.dirty = false
 	}
-}
-
-func sortedStarts(t tier, newestFirst bool) []int64 {
-	starts := make([]int64, 0, len(t.buckets))
-	for start := range t.buckets {
-		starts = append(starts, start)
-	}
-	sort.Slice(starts, func(i, j int) bool {
-		if newestFirst {
-			return starts[i] > starts[j]
-		}
-		return starts[i] < starts[j]
-	})
-	return starts
 }
 
 func sortedKeys(rows map[Key]*Counters) []Key {
@@ -586,8 +710,20 @@ func (l *Ledger) UnmarshalState(raw []byte, now time.Time) error {
 			}
 		}
 	}
-	l.fine.prune(now)
-	l.coarse.prune(now)
+	for _, marker := range []struct {
+		unix   int64
+		target *time.Time
+	}{{state.FineFrom, &l.fineFrom}, {state.CoarseFrom, &l.coarseFrom}} {
+		if marker.unix <= 0 {
+			continue
+		}
+		from := time.Unix(marker.unix, 0).UTC()
+		if from.After(now) {
+			from = now.UTC()
+		}
+		*marker.target = later(*marker.target, from)
+	}
+	l.pruneLocked(now)
 	if state.Since != nil && (l.since.IsZero() || state.Since.Before(l.since)) {
 		l.since = state.Since.UTC()
 	}
