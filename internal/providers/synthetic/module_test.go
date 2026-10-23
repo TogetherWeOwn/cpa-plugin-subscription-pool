@@ -574,3 +574,23 @@ func TestSummarizeBodyExtractsErrorText(t *testing.T) {
 		}
 	}
 }
+
+func TestUsageAccountAndPeakInFlight(t *testing.T) {
+	m, _ := newTestModule(t, "{}")
+	if got := m.UsageAccount(pluginapi.UsageRecord{AuthID: paidAuthID}); got != "synthetic#1" {
+		t.Fatalf("UsageAccount(paid) = %q, want synthetic#1", got)
+	}
+	if got := m.UsageAccount(pluginapi.UsageRecord{AuthID: "unknown"}); got != "" {
+		t.Fatalf("UsageAccount(unknown) = %q, want empty", got)
+	}
+	only := candidate(infiniteAuthID, "synthetic-infinite")
+	mustPick(t, m, pickReq(true, only))
+	mustPick(t, m, pickReq(true, only))
+	_ = m.HandleUsage(context.Background(), usage(infiniteAuthID, http.StatusOK, nil))
+	for _, item := range statusOf(t, m)["accounts"].([]any) {
+		lane := item.(map[string]any)
+		if lane["kind"] == "infinite" && (lane["peak_in_flight"].(float64) != 2 || lane["in_flight"].(float64) != 1 || lane["peak_in_flight_at"] == nil) {
+			t.Fatalf("infinite lane = %v, want peak 2 and in-flight 1", lane)
+		}
+	}
+}

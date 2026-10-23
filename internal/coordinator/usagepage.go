@@ -513,8 +513,10 @@ func (c *Coordinator) usagePageResponse(req pluginapi.ManagementRequest) plugina
 	if nonce == "" {
 		return managementError(http.StatusInternalServerError, "nonce_failed", "could not create a script nonce")
 	}
-	page := strings.Replace(usagePageTemplate, usagePageInitialMarker, string(data), 1)
-	page = strings.ReplaceAll(page, usagePageNonceMarker, nonce)
+	// Nonce first, on the template only, so account or model names that
+	// happen to contain a marker can never be rewritten.
+	page := strings.ReplaceAll(usagePageTemplate, usagePageNonceMarker, nonce)
+	page = strings.Replace(page, usagePageInitialMarker, string(data), 1)
 	return pluginapi.ManagementResponse{
 		StatusCode: http.StatusOK,
 		Headers: http.Header{
