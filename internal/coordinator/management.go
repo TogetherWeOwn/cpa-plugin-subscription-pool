@@ -30,9 +30,11 @@ func (c *Coordinator) managementRoutes() managementRoutesBody {
 	body := managementRoutesBody{
 		Routes: []managementRoute{
 			{Method: http.MethodGet, Path: managementStatusPath, Description: "Reports aggregated subscription-pool status across every provider."},
+			{Method: http.MethodGet, Path: managementUsagePath, Description: "Reports request, token and error history per provider, account and model (?range=1h|6h|24h|7d) plus quota, for the usage page."},
 		},
 		Resources: []managementResource{
-			{Path: resourceStatusPath, Menu: "Subscription Quota", Description: "Shows Z.ai, OpenCode Go and synthetic.new quota and account health."},
+			{Path: resourceStatusPath, Menu: usagePageMenu, Description: "Usage and quota for Z.ai, OpenCode Go and synthetic.new: requests, tokens, error rates, models, quota bars with reset times, infinite mode and concurrency."},
+			{Path: resourceUsageDataPath, Description: "Redacted JSON data behind the usage page (?range=1h|6h|24h|7d)."},
 		},
 	}
 	for _, entry := range c.modules {
@@ -95,8 +97,14 @@ func (c *Coordinator) handleManagement(ctx context.Context, req pluginapi.Manage
 	if req.Method == http.MethodGet && req.Path == managementStatusPath {
 		return managementJSON(http.StatusOK, c.managementStatus())
 	}
+	if req.Method == http.MethodGet && req.Path == managementUsagePath {
+		return c.usageDataResponse(req)
+	}
 	if req.Method == http.MethodGet && isResourceStatusPath(req.Path) {
-		return c.resourceStatusResponse()
+		return c.usagePageResponse(req)
+	}
+	if req.Method == http.MethodGet && isResourceUsageDataPath(req.Path) {
+		return c.usageDataResponse(req)
 	}
 	for _, entry := range c.modules {
 		capable, ok := entry.module.(providermodule.ManagementCapable)

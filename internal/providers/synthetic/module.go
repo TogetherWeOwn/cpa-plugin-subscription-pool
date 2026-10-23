@@ -65,6 +65,9 @@ type lane struct {
 	busyUntil time.Time
 	busyWhy   string
 	stats     laneStats
+
+	peakInFlight int
+	peakAt       time.Time
 }
 
 type laneStats struct {
@@ -142,6 +145,7 @@ type Module struct {
 var (
 	_ providermodule.Module          = (*Module)(nil)
 	_ providermodule.UsageRecognizer = (*Module)(nil)
+	_ providermodule.UsageAttributor = (*Module)(nil)
 )
 
 // NewModule constructs the synthetic module with a real clock and HTTP client.
@@ -235,6 +239,8 @@ func (m *Module) Reconfigure(_ context.Context, host providermodule.HostConfig, 
 			next.busyUntil = previous.busyUntil
 			next.busyWhy = previous.busyWhy
 			next.stats = previous.stats
+			next.peakInFlight = previous.peakInFlight
+			next.peakAt = previous.peakAt
 		}
 	}
 	for fingerprint, next := range accounts {
@@ -531,6 +537,10 @@ func laneBusy(item *lane, now time.Time) (bool, string) {
 func (m *Module) admitLocked(item *lane, now time.Time) {
 	m.pruneInFlightLocked(item, now)
 	item.inFlight = append(item.inFlight, now)
+	if len(item.inFlight) > item.peakInFlight {
+		item.peakInFlight = len(item.inFlight)
+		item.peakAt = now
+	}
 }
 
 func (m *Module) inFlightLocked(item *lane, now time.Time) int {
@@ -566,6 +576,19 @@ func (m *Module) RecognizeUsage(record pluginapi.UsageRecord) bool {
 	}
 	_, ok := m.kindOfProviderLocked(record.Provider)
 	return ok
+}
+
+// UsageAccount names the lane a usage record belongs to (for example
+// "synthetic#1" or "synthetic-infinite#1") for the coordinator's usage
+// ledger. HandleUsage has already created a learned lane for an unknown auth
+// ID of a configured provider, so every accepted record resolves.
+func (m *Module) UsageAccount(record pluginapi.UsageRecord) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if item := m.lanes[strings.TrimSpace(record.AuthID)]; item != nil {
+		return item.Name
+	}
+	return ""
 }
 
 // HandleUsage releases the in-flight slot, records throughput, and learns
@@ -818,6 +841,8 @@ func (m *Module) Status(context.Context) (json.RawMessage, error) {
 		Windows          map[string]statusWindow `json:"windows"`
 		NextRegenPercent *float64                `json:"next_regen_percent,omitempty"`
 		InFlight         int                     `json:"in_flight"`
+		PeakInFlight     int                     `json:"peak_in_flight"`
+		PeakInFlightAt   *time.Time              `json:"peak_in_flight_at,omitempty"`
 		MaxConcurrent    int                     `json:"max_concurrent"`
 		Stats            statsView               `json:"stats"`
 		LastPollError    string                  `json:"last_poll_error,omitempty"`
@@ -885,6 +910,11 @@ func (m *Module) Status(context.Context) (json.RawMessage, error) {
 			Name: item.Name, Provider: item.Provider, Kind: item.Kind, AuthID: item.AuthID,
 			Account: item.Account, Learned: item.learned, CredentialBound: bound,
 			Windows: map[string]statusWindow{}, InFlight: m.inFlightLocked(item, now),
+			PeakInFlight: item.peakInFlight,
+		}
+		if !item.peakAt.IsZero() {
+			value := item.peakAt
+			entry.PeakInFlightAt = &value
 		}
 		if item.Kind == kindPaid {
 			entry.MaxConcurrent = m.cfg.MaxConcurrent

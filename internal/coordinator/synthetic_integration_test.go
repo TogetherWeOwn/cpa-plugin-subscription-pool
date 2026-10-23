@@ -129,9 +129,28 @@ func TestCoordinatorRegistersWithoutZaiAndRoutesSynthetic(t *testing.T) {
 	if syn["status"] != "registered" || syn["credential_bound"] != false {
 		t.Fatalf("synthetic status = %v", syn)
 	}
-	page := string(c.resourceStatusResponse().Body)
-	if !strings.Contains(page, "synthetic.new paid") || !strings.Contains(page, "synthetic.new infinite") || strings.Contains(page, "PLACEHOLDER") {
-		t.Fatalf("dashboard missing synthetic lanes or leaked the key field")
+	// The usage page sees both lanes and the dispatched usage, attributed to
+	// the paid lane by name, without the key, its placeholder or auth IDs.
+	resp2 := c.HandleManagement(context.Background(), pluginapi.ManagementRequest{Method: http.MethodGet, Path: resourcePluginBasePath + resourceUsageDataPath})
+	page := string(resp2.Body)
+	if strings.Contains(page, "PLACEHOLDER") || strings.Contains(page, "openai-compatibility:") || strings.Contains(page, "test-only-go-key") {
+		t.Fatalf("usage data leaked a key field or auth ID")
+	}
+	var data usagePageData
+	if err := json.Unmarshal(resp2.Body, &data); err != nil {
+		t.Fatal(err)
+	}
+	kinds := map[string]bool{}
+	for _, card := range data.Quota {
+		if card.Provider == "synthetic" {
+			kinds[card.Kind] = true
+		}
+	}
+	if !kinds["paid"] || !kinds["infinite"] || data.Synthetic == nil {
+		t.Fatalf("usage data missing synthetic lanes: %+v", data.Quota)
+	}
+	if len(data.Usage.Totals) != 1 || data.Usage.Totals[0].Account != "synthetic#1" || data.Usage.Totals[0].Status429 != 1 {
+		t.Fatalf("usage totals = %+v", data.Usage.Totals)
 	}
 }
 

@@ -77,6 +77,20 @@ func (m *zaiModule) HandleUsage(_ context.Context, record pluginapi.UsageRecord)
 	return m.runtime.handleUsage(record)
 }
 
+// UsageAccount names the Z.ai account a usage record belongs to, for the
+// coordinator's usage ledger.
+func (m *zaiModule) UsageAccount(record pluginapi.UsageRecord) string {
+	snapshot, err := m.runtime.current()
+	if err != nil || snapshot == nil {
+		return ""
+	}
+	identity := snapshot.byAuthID[strings.TrimSpace(record.AuthID)]
+	if identity == "" {
+		return ""
+	}
+	return snapshot.byIdentity[identity].Name
+}
+
 func (m *zaiModule) Status(_ context.Context) (json.RawMessage, error) {
 	status := "registered"
 	if m.runtime.validationStatus() != "" {

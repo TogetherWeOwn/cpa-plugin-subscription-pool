@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Usage & Quota page: the plugin's Management Center page is rebuilt to the official Dashboard and Quota Management design. It adds time ranges (1 h, 6 h, 24 h, 7 d), provider tabs, search and a model filter; success-rate, token, account and speed tiles; a throughput chart with a data table; per-provider, per-account and per-model usage (requests, error rate, 429s, tokens, latency, time to first token, tokens per second); quota cards with remaining-percent bars, reset times and countdowns; a two-week quota-window timeline; and a synthetic.new panel with the weekly-credit refill schedule, infinite-mode usage and speed, and per-lane concurrency. The menu entry is now **Usage & Quota**.
+- `internal/usage`: a bounded usage ledger (5-minute buckets for 48 h, 1-hour buckets for 8 days, 200 rows per bucket) fed by every usage record a hosted module accepts, saved every 5 minutes and on shutdown to `<auth-dir>/subscription-pool/usage/ledger.state`.
+- `GET /v0/management/plugins/subscription-pool/usage` and the resource route `usage.json` serve the page's redacted data.
+- `providermodule.UsageAttributor` lets a module name the account a usage record belongs to; the zai, OpenCode Go and synthetic modules implement it.
+- synthetic status reports `peak_in_flight` and `peak_in_flight_at` per lane.
+
+### Changed
+
+- The usage page runs one inline script under a per-response CSP nonce and fetches `usage.json` from its own origin (`connect-src 'self'`); it still has no `frame-ancestors`, so cross-origin Management Center frames keep working.
+
 ## [0.5.0] - 2026-10-23
 
 ### Added

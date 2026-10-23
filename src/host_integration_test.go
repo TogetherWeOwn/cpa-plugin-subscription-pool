@@ -32,8 +32,10 @@ const fixtureKey = "test-only-host-integration-key"
 // rewriting on module-declared routes in this slice; only the resource
 // prefix (the registered plugin ID) changed with the rename.
 const (
-	managementStatusPath = "/v0/management/plugins/" + pluginID + "/status"
-	resourceStatusPath   = "/status"
+	managementStatusPath  = "/v0/management/plugins/" + pluginID + "/status"
+	resourceStatusPath    = "/status"
+	resourceUsageDataPath = "/usage.json"
+	usagePageMenu         = "Usage & Quota"
 )
 
 // ownedZaiAuthIDs computes the exact auth IDs the zai module will assign for
@@ -90,13 +92,13 @@ func TestManagementRouteEndToEnd(t *testing.T) {
 		Routes    []pluginapi.ManagementRoute `json:"routes"`
 		Resources []pluginapi.ResourceRoute   `json:"resources"`
 	}](t, registerRaw, pluginabi.MethodManagementRegister)
-	// The coordinator's own aggregated status route, plus the zai module's 4
-	// declared routes (status/refresh/unblock/account-config) = 5 total.
-	if len(registered.Routes) != 5 {
-		t.Fatalf("management.register routes = %#v, want five (coordinator status + zai's 4)", registered.Routes)
+	// The coordinator's own aggregated status and usage routes, plus the zai
+	// module's 4 declared routes (status/refresh/unblock/account-config) = 6.
+	if len(registered.Routes) != 6 {
+		t.Fatalf("management.register routes = %#v, want six (coordinator status + usage + zai's 4)", registered.Routes)
 	}
-	if len(registered.Resources) != 1 || registered.Resources[0].Path != resourceStatusPath || registered.Resources[0].Menu != "Subscription Quota" {
-		t.Fatalf("management.register resources = %#v, want Subscription Quota menu", registered.Resources)
+	if len(registered.Resources) != 2 || registered.Resources[0].Path != resourceStatusPath || registered.Resources[0].Menu != usagePageMenu || registered.Resources[1].Path != resourceUsageDataPath || registered.Resources[1].Menu != "" {
+		t.Fatalf("management.register resources = %#v, want the usage page menu and its data route", registered.Resources)
 	}
 	route := registered.Routes[0]
 	if !strings.EqualFold(route.Method, http.MethodGet) || route.Path != managementStatusPath {
@@ -163,11 +165,11 @@ func TestResourceRouteEndToEndAllowsCrossOriginManagementCenterFrame(t *testing.
 	registered := decodeEnvelopeResult[struct {
 		Resources []pluginapi.ResourceRoute `json:"resources"`
 	}](t, registerRaw, pluginabi.MethodManagementRegister)
-	if len(registered.Resources) != 1 {
-		t.Fatalf("management.register resources = %#v, want one", registered.Resources)
+	if len(registered.Resources) != 2 {
+		t.Fatalf("management.register resources = %#v, want the page and its data route", registered.Resources)
 	}
 	resource := registered.Resources[0]
-	if resource.Path != resourceStatusPath || resource.Menu != "Subscription Quota" {
+	if resource.Path != resourceStatusPath || resource.Menu != usagePageMenu {
 		t.Fatalf("resource route = %#v", resource)
 	}
 
@@ -191,7 +193,7 @@ func TestResourceRouteEndToEndAllowsCrossOriginManagementCenterFrame(t *testing.
 		t.Fatalf("management.handle resource: %v", err)
 	}
 	response := decodeEnvelopeResult[pluginapi.ManagementResponse](t, handleRaw, pluginabi.MethodManagementHandle)
-	if response.StatusCode != http.StatusOK || !strings.Contains(string(response.Body), "Subscription Quota") {
+	if response.StatusCode != http.StatusOK || !strings.Contains(string(response.Body), "Quota Management") || !strings.Contains(string(response.Body), `id="sp-data"`) {
 		t.Fatalf("resource response = %d %q", response.StatusCode, response.Body)
 	}
 	if csp := response.Headers.Get("Content-Security-Policy"); strings.Contains(csp, "frame-ancestors") {
