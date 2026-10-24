@@ -1,0 +1,40 @@
+Cloudflare Workers AI credential prerequisites (staged source; no activation)
+
+The paid Workers subscription includes the same 10,000-neuron ACCOUNT/DAY
+Workers AI allowance as Workers Free. It is not a monthly credit bank.
+Default guard: stayWithinIncluded: true. Only false permits PAYG.
+
+Use a dedicated API token scoped to the intended account, not the global API key.
+The documented inference API accepts Workers AI Read or Workers AI Write;
+request the least privilege actually accepted by the OpenAI-compatible endpoint,
+plus Account Analytics Read for account-wide GraphQL usage. Verify the exact
+permission names and account resource in Cloudflare's current token UI/workflow.
+Do not rotate an existing key or grant access to other accounts.
+
+Private intake may use ~/secure-drop/cloudflare-workers-ai.env, mode 0600,
+with CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_WORKERS_AI_TOKEN. Never paste a token
+in chat, tickets, command arguments or a populated committed configuration.
+Do not put the global credential from cloudflare.env into the provider.
+
+The operator verified that the live account-filtered GraphQL query accepts
+aiInferenceAdaptiveGroups.sum.totalNeurons and same-day date_geq/date_leq
+on 2026-10-24 using the existing global credential. It returned an empty group
+list. This verifies schema acceptance only: scoped-token permissions and an
+actual nonzero usage observation have NOT been verified. No inference was sent.
+
+A key drop alone must not enable the provider. First complete the exact-source
+review/release/immutable-host gates; then verify the scoped token's metadata-only
+analytics access, single-scheduler ownership and permitted model mappings.
+GET and privately back up the complete management value, merge changes, PUT
+the FULL value, re-GET and compare. Never PUT a credential/provider fragment as
+replacement for the whole configuration. Preserve all unrelated credentials.
+
+The local guard cannot guarantee a zero Cloudflare bill when analytics lag,
+other consumers use the account or independent replicas reserve separately.
+Use provider-enforced no-billing controls or Workers Free for an absolute cap.
+No new token, inference, billing opt-in or provider activation is performed here.
+
+Sources:
+https://developers.cloudflare.com/workers-ai/platform/pricing/
+https://developers.cloudflare.com/api/resources/ai/methods/run/
+https://developers.cloudflare.com/analytics/graphql-api/getting-started/authentication/api-token-auth/

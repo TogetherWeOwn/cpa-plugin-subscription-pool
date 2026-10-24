@@ -156,12 +156,17 @@ func loadHostCPAConfig(path string) (hostCPAConfig, error) {
 				ProxyURL: entry.ProxyURL,
 			})
 		}
+		models := make([]providermodule.OpenAICompatibilityModel, 0, len(compat.Models))
+		for _, model := range compat.Models {
+			models = append(models, providermodule.OpenAICompatibilityModel{Name: model.Name, Alias: model.Alias})
+		}
 		compats = append(compats, providermodule.OpenAICompatibility{
 			Name:          compat.Name,
 			BaseURL:       compat.BaseURL,
 			Disabled:      compat.Disabled,
 			Headers:       compat.Headers,
 			APIKeyEntries: entries,
+			Models:        models,
 		})
 	}
 	return hostCPAConfig{

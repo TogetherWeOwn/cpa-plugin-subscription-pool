@@ -58,6 +58,14 @@ type OpenAICompatibility struct {
 	Disabled      bool
 	Headers       map[string]string
 	APIKeyEntries []OpenAICompatibilityAPIKey
+	Models        []OpenAICompatibilityModel
+}
+
+// OpenAICompatibilityModel binds the host alias to the actual upstream model.
+// Cost guards must price Name, never trust the spelling of Alias.
+type OpenAICompatibilityModel struct {
+	Name  string
+	Alias string
 }
 
 // OpenAICompatibilityAPIKey mirrors one openai-compatibility api-key-entries item.

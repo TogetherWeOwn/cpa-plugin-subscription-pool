@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-24
+
+### Added
+
+- Cloudflare Workers AI module with `stayWithinIncluded: true` by default. Account-wide daily neuron admission uses durable worst-case model reservations plus fresh analytics and a safety margin; stale/unknown usage, unbound credentials, unbounded models and corrupt storage fail closed. `false` explicitly permits PAYG; returning to included-only preserves the cross-midnight PAYG completion fence.
+- NVIDIA NIM module with `stayWithinFree: true` by default. Admission requires verified account/model free entitlement, an exact upstream-model allowlist and a positive verified RPM cap. All keys share durable local reservations, an optional lifetime request ceiling and sticky observed exhaustion; no monthly credit grant is invented. Trial access and outputs remain internal-evaluation-only under NVIDIA's governing terms.
+- Usage and Quota support for both providers: Cloudflare daily UTC allowance, separate analytics/local debits, safety margin and a non-pooled calendar projection; NVIDIA guard state, local shared RPM and lifetime admissions rather than a provider balance. Both example host lanes start disabled pending credential/entitlement verification.
+- Combined throwaway-host fixtures exercise both guards with dummy API-key entries only, including Cloudflare boundary/PAYG/re-enable transitions and NVIDIA streaming, tools, free ceiling and disabled-lane behavior. No live model comparison or paid inference is needed.
+
 ## [0.6.1] - 2026-10-23
 
 ### Fixed
@@ -147,7 +156,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Raw plan keys, authorization headers, request bodies, and management credentials are excluded from persistent state, logs, and status responses; persistence uses only derived account identities and redacted state.
 - State and settings commits are atomic, redacted, and recovered fail-closed after interrupted writes.
 
-[Unreleased]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/releases/tag/v0.6.1
 [0.6.0]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/releases/tag/v0.6.0
 [0.5.0]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/releases/tag/v0.5.0
