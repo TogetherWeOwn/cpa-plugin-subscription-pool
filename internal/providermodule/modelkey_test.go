@@ -15,3 +15,19 @@ func TestModelKeyMatchesEqualFold(t *testing.T) {
 		}
 	}
 }
+
+func TestRouteKeyDropsOnlyTheOwnProviderPrefix(t *testing.T) {
+	for raw, want := range map[string]string{
+		"x":                       ModelKey("x"),
+		" NVIDIA-NIM/X ":          ModelKey("x"),
+		"nvidia-nim/a/b":          ModelKey("a/b"),
+		"other/x":                 ModelKey("other/x"),
+		"nvidia-nimx":             ModelKey("nvidia-nimx"),
+		"nvidia-nim/":             "",
+		"nvidia-nim/nvidia-nim/x": ModelKey("nvidia-nim/x"),
+	} {
+		if got := RouteKey("nvidia-nim", raw); got != want {
+			t.Fatalf("RouteKey(%q) = %q, want %q", raw, got, want)
+		}
+	}
+}

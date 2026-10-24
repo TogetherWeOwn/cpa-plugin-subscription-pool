@@ -1,6 +1,22 @@
 package providermodule
 
-import "unicode"
+import (
+	"strings"
+	"unicode"
+)
+
+// RouteKey folds a requested or configured route the way the host matches
+// aliases and upstream names (strings.EqualFold), then drops only the owning
+// provider's own prefix. Another provider's prefix stays part of the route:
+// on this provider "other/x" is a distinct alias that may name a costlier
+// upstream than "x".
+func RouteKey(provider, raw string) string {
+	key := ModelKey(strings.TrimSpace(raw))
+	if prefix := ModelKey(provider + "/"); strings.HasPrefix(key, prefix) {
+		key = key[len(prefix):]
+	}
+	return key
+}
 
 // ModelKey canonicalizes a model route so two strings share a key exactly
 // when strings.EqualFold treats them as equal, which is how the host resolves

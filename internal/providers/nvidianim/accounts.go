@@ -29,15 +29,16 @@ func discover(host providermodule.HostConfig, cfg moduleConfig) map[string]lane 
 		}
 		// A shared alias is safe only when every upstream it could select is
 		// verified free. Never let entry order turn an ambiguous paid route
-		// into a free one (including an alias colliding with a model name or
-		// differing only in case: the host pools every fold-equal alias).
+		// into a free one (including an alias colliding with a model name,
+		// differing only in case, which the host pools, or adding this
+		// provider's own prefix, which the host may strip).
 		routes := map[string]bool{}
 		for _, model := range compat.Models {
 			for _, route := range []string{model.Name, model.Alias} {
-				if route == "" {
+				key := providermodule.RouteKey(providerID, route)
+				if key == "" {
 					continue
 				}
-				key := providermodule.ModelKey(route)
 				free, seen := routes[key]
 				routes[key] = cfg.FreeModels[model.Name] && (!seen || free)
 			}

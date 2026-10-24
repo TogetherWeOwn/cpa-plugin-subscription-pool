@@ -453,7 +453,7 @@ func (m *Module) Pick(_ context.Context, req pluginapi.SchedulerPickRequest) (pl
 		}
 		a := m.accounts[l.account]
 		b := m.budgetLocked(l.account, now)
-		reserve := l.reservations[routeKey(l.provider, req.Model)]
+		reserve := l.reservations[providermodule.RouteKey(l.provider, req.Model)]
 		queue := b.Pending[id]
 		if m.cfg.StayWithinIncluded {
 			switch {
