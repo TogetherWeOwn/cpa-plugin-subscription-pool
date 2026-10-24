@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	_ "embed"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 
@@ -13,6 +15,13 @@ import (
 )
 
 const pluginID = coordinator.PluginID
+const pluginDisplayName = "Subscription Pool: Z.ai · OpenCode Go · synthetic.new"
+
+// The registration carries its own logo: no remote fetch or management key is
+// needed when the official panel renders it.
+//
+//go:embed logo.svg
+var pluginLogo []byte
 
 // pluginVersion is stamped at build time with -ldflags -X main.pluginVersion.
 // It is mirrored into coordinator.PluginVersion so the registered plugin
@@ -76,10 +85,11 @@ func pluginRegistration() registration {
 	return registration{
 		SchemaVersion: pluginabi.SchemaVersion,
 		Metadata: pluginapi.Metadata{
-			Name:             pluginID,
+			Name:             pluginDisplayName,
 			Version:          pluginVersion,
 			Author:           "TogetherWeOwn",
 			GitHubRepository: "https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool",
+			Logo:             "data:image/svg+xml;base64," + base64.StdEncoding.EncodeToString(pluginLogo),
 		},
 		// Advertised per docs/ARCHITECTURE.md: quota-aware scheduler,
 		// usage accounting feed, and management status endpoints. The

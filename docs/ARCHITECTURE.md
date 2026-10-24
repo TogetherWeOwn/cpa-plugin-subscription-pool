@@ -13,6 +13,12 @@ Version 0.1 (zai module):
 
 The plugin does not proxy inference, rewrite requests, or mint credentials. The zai module's primary quota signal is `GET https://api.z.ai/api/monitor/usage/quota/limit`, queried per account with that account's plan key. Local accounting is a conservative fallback when the endpoint fails, and an observed upstream `429` remains authoritative.
 
+## Published identity and management integration
+
+The registered display name is **Subscription Pool: Z.ai · OpenCode Go · synthetic.new**. The host-facing ID remains `subscription-pool`, independently of `Metadata.Name`; library filenames, config keys, state directories, model aliases and API routes do not change with branding. `Metadata.Logo` is a base64 SVG data URI embedded from `src/logo.svg`, so rendering makes no external asset request. The registry and the existing **Usage and Quota** resource menu describe all three providers.
+
+SDK v7.2.154's metadata has no description field and its capabilities have no quota provider. `supports_quota` therefore remains false; no unsupported quota RPCs are advertised. The patched v8 host's newer quota-provider contract needs a separate SDK/handler compatibility change. See [the three-provider Management Center proposal](management-center-quota-proposal.md) for the verified ABI fields, current menu integration and native-bridge requirements.
+
 ## Exact CLIProxyAPI plugin contract
 
 The baseline is CLIProxyAPI v7.2.150, using the SDK's native c-shared/dlopen plugin pattern:

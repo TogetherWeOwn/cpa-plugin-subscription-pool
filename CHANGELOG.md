@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-23
+
+### Fixed
+
+- The official plugin list now identifies the coordinator as **Subscription Pool: Z.ai · OpenCode Go · synthetic.new**, with an embedded, self-contained SVG logo and the renamed source repository. The plugin-store description covers all three providers. The stable `subscription-pool` ID, model aliases, configuration, scheduling and persisted usage are unchanged.
+- README install/config examples now use the current artifact names and nested three-provider configuration instead of the retired Z.ai-only plugin. The Management Center quota proposal covers all three modules, the existing Usage and Quota menu, and the actual SDK limitation: v7.2.154 has no quota-provider capability or metadata description field; native v8 quota bridging remains separate, compatibility-tested work rather than an unsupported advertised flag.
+
 ## [0.6.0] - 2026-10-23
 
 ### Added
@@ -140,7 +147,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Raw plan keys, authorization headers, request bodies, and management credentials are excluded from persistent state, logs, and status responses; persistence uses only derived account identities and redacted state.
 - State and settings commits are atomic, redacted, and recovered fail-closed after interrupted writes.
 
-[Unreleased]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/releases/tag/v0.6.1
 [0.6.0]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/releases/tag/v0.6.0
 [0.5.0]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/releases/tag/v0.5.0
 [0.4.5]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/releases/tag/v0.4.5

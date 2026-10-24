@@ -298,8 +298,12 @@ func TestHostRegistersPlugin(t *testing.T) {
 			continue
 		}
 		found = true
-		if plugin.Metadata.Name != pluginID {
-			t.Fatalf("registered name = %q, want %q", plugin.Metadata.Name, pluginID)
+		const wantName = "Subscription Pool: Z.ai · OpenCode Go · synthetic.new"
+		if plugin.Metadata.Name != wantName {
+			t.Fatalf("registered name = %q, want %q", plugin.Metadata.Name, wantName)
+		}
+		if !strings.HasPrefix(plugin.Metadata.Logo, "data:image/svg+xml;base64,") {
+			t.Fatal("registered plugin logo is missing")
 		}
 		if strings.TrimSpace(plugin.Metadata.Version) == "" {
 			t.Fatal("registered version is empty")

@@ -135,17 +135,17 @@ jobs:
       - name: Resolve immutable host image matrix
         run: .github/scripts/resolve-host-images.sh > "$RUNNER_TEMP/host-images.json"
       - name: Package plugin
-        run: make package VERSION=0.6.0 COMPATIBILITY_EVIDENCE="$RUNNER_TEMP/host-images.json"
+        run: make package VERSION=0.6.1 COMPATIBILITY_EVIDENCE="$RUNNER_TEMP/host-images.json"
       - name: Verify release artifacts
         run: |
           set -euo pipefail
-          library="dist/subscription-pool-v0.6.0.so"
-          archive="dist/subscription-pool_0.6.0_linux_amd64.zip"
+          library="dist/subscription-pool-v0.6.1.so"
+          archive="dist/subscription-pool_0.6.1_linux_amd64.zip"
           test -s "$library"
           nm -D "$library" | grep -Eq '[[:space:]]cliproxy_plugin_init$'
           test "$(unzip -Z1 "$archive")" = "subscription-pool.so"
           cmp "$library" <(unzip -p "$archive" subscription-pool.so)
-          make validate-release VERSION=0.6.0 TAG=v0.6.0
+          make validate-release VERSION=0.6.1 TAG=v0.6.1
 
   # Host image compatibility matrix, shared with the standalone workflow so it
   # lives in one place and is covered by `ci-ok`.
