@@ -1,5 +1,6 @@
 // Render the REAL throwaway host's exported quota page, without upstream traffic.
-// NODE_PATH=/app/node_modules node check-cloudflare-page.cjs <fixture-directory>
+// The directory is SP_CLOUDFLARE_PAGE_OUT from the host matrix. CI runs:
+// NODE_PATH=<dir with playwright installed>/node_modules node check-cloudflare-page.cjs <directory>
 const { chromium } = require('playwright');
 const fs = require('node:fs');
 const path = require('node:path');

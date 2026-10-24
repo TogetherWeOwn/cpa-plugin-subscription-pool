@@ -58,12 +58,39 @@ func TestRate429RetryAfterAndCreditFailureAreDifferent(t *testing.T) {
 	m.now = func() time.Time { return start.Add(24 * time.Hour) }
 	assertPick(t, m, r, false)
 }
-func TestQuota429RemainsExhaustedWithoutAnInventedReset(t *testing.T) {
+func TestQuotaWorded429BacksOffDurablyWithoutPermanentLatch(t *testing.T) {
+	for _, body := range []string{`{"error":"Insufficient credits"}`, `{"error":"Rate limit exceeded: 40 requests per minute quota"}`} {
+		h := hostConfig(t)
+		m := setup(t, h, freeConfig)
+		r := req(m)
+		failure := pluginapi.UsageRecord{AuthID: r.Candidates[0].ID, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: 429, Body: body}, ResponseHeaders: http.Header{"Retry-After": {"5"}}}
+		if err := m.HandleUsage(context.Background(), failure); err != nil {
+			t.Fatal(err)
+		}
+		m.now = func() time.Time { return start.Add(time.Hour - time.Second) }
+		assertPick(t, m, r, false)
+		_ = m.Close(context.Background())
+		next := setup(t, h, freeConfig)
+		next.now = func() time.Time { return start.Add(time.Hour - time.Second) }
+		assertPick(t, next, req(next), false) // the backoff is durable across restart
+		next.now = func() time.Time { return start.Add(time.Hour) }
+		assertPick(t, next, req(next), true) // ...but bounded: no permanent latch
+		if next.state.FreeExhausted {
+			t.Fatal("worded 429 latched free exhaustion")
+		}
+	}
+}
+
+func TestLongerRetryAfterWinsOverQuotaBackoff(t *testing.T) {
 	m := setup(t, hostConfig(t), freeConfig)
 	r := req(m)
-	_ = m.HandleUsage(context.Background(), pluginapi.UsageRecord{AuthID: r.Candidates[0].ID, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: 429, Body: `{"error":"Insufficient credits"}`}})
-	m.now = func() time.Time { return start.Add(30 * 24 * time.Hour) }
+	if err := m.HandleUsage(context.Background(), pluginapi.UsageRecord{AuthID: r.Candidates[0].ID, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: 429, Body: `daily quota`}, ResponseHeaders: http.Header{"Retry-After": {"7200"}}}); err != nil {
+		t.Fatal(err)
+	}
+	m.now = func() time.Time { return start.Add(2*time.Hour - time.Second) }
 	assertPick(t, m, r, false)
+	m.now = func() time.Time { return start.Add(2 * time.Hour) }
+	assertPick(t, m, r, true)
 }
 func TestPublicStatusIsRedactedAndHonestAboutLocalCounts(t *testing.T) {
 	m := setup(t, hostConfig(t), freeConfig)

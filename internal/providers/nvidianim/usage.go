@@ -10,6 +10,8 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
+const quotaBackoff = time.Hour
+
 func (m *Module) HandleUsage(_ context.Context, r pluginapi.UsageRecord) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -24,20 +26,24 @@ func (m *Module) HandleUsage(_ context.Context, r pluginapi.UsageRecord) error {
 		return nil
 	}
 	now := m.now().UTC()
-	until := now.Add(retryAfter(r.ResponseHeaders, now))
-	if until.After(m.state.CooldownUntil) {
-		m.state.CooldownUntil = until
-	}
-	// A rate-limit response may explicitly identify credit/trial exhaustion.
-	// Never treat a one-minute RPM refill as a free-credit grant. The body is
-	// inspected only for classification and is never saved, echoed or logged.
+	delay := retryAfter(r.ResponseHeaders, now)
+	// Only 402 is an explicit payment boundary and latches until an operator
+	// clears it. Ordinary RPM 429 bodies also say "quota" or "daily", so a
+	// worded 429 gets a durable, bounded backoff instead of a permanent latch:
+	// a one-minute refill is still never treated as a free-credit grant. The
+	// body is inspected only for classification and never saved or logged.
 	body := r.Failure.Body
 	if len(body) > 16384 {
 		body = body[:16384]
 	}
 	body = strings.ToLower(body)
-	if code == 402 || (code == 429 && (strings.Contains(body, "credit") || strings.Contains(body, "quota") || strings.Contains(body, "trial") || strings.Contains(body, "daily") || strings.Contains(body, "monthly"))) {
+	if code == 402 {
 		m.state.FreeExhausted = true
+	} else if code == 429 && delay < quotaBackoff && (strings.Contains(body, "credit") || strings.Contains(body, "quota") || strings.Contains(body, "trial") || strings.Contains(body, "daily") || strings.Contains(body, "monthly")) {
+		delay = quotaBackoff
+	}
+	if until := now.Add(delay); until.After(m.state.CooldownUntil) {
+		m.state.CooldownUntil = until
 	}
 	return m.save()
 }

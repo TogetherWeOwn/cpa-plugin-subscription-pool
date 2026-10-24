@@ -48,6 +48,80 @@ func pickRequest(m *Module, which int) pluginapi.SchedulerPickRequest {
 	return pluginapi.SchedulerPickRequest{Model: providerID + "/qwen3-30b-a3b-fp8", Candidates: []pluginapi.SchedulerAuthCandidate{{ID: ids[which], Provider: "openai-compatible-" + providerID}}}
 }
 
+func pickModel(m *Module, which int, model string) pluginapi.SchedulerPickRequest {
+	r := pickRequest(m, which)
+	r.Model = model
+	return r
+}
+
+func reconfigure(t *testing.T, m *Module, h providermodule.HostConfig, raw string) {
+	t.Helper()
+	if err := m.Reconfigure(context.Background(), h, json.RawMessage(raw)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// restarted opens a fresh module over the same durable state, as after a
+// process restart.
+func restarted(t *testing.T, h providermodule.HostConfig, now *time.Time, raw string) *Module {
+	t.Helper()
+	m := NewModule()
+	m.noPoller = true
+	m.now = func() time.Time { return *now }
+	t.Cleanup(func() { _ = m.Close(context.Background()) })
+	reconfigure(t, m, h, raw)
+	return m
+}
+
+func mustAdmit(t *testing.T, m *Module, r pluginapi.SchedulerPickRequest) {
+	t.Helper()
+	if got, err := m.Pick(context.Background(), r); err != nil || !got.Handled {
+		t.Fatalf("%s refused: %+v %v", r.Model, got, err)
+	}
+}
+
+func mustRefuse(t *testing.T, m *Module, r pluginapi.SchedulerPickRequest, reason string) {
+	t.Helper()
+	if _, err := m.Pick(context.Background(), r); err == nil || !strings.Contains(err.Error(), reason) {
+		t.Fatalf("%s: got %v, want refusal %q", r.Model, err, reason)
+	}
+}
+
+func TestUsageReadingExpiresExactlyAtMaxAge(t *testing.T) {
+	m, now, _ := configured(t, `{}`)
+	m.pollOnce(context.Background(), true)
+	observed := *now
+	*now = observed.Add(m.cfg.MaxAge)
+	mustAdmit(t, m, pickRequest(m, 0))
+	*now = observed.Add(m.cfg.MaxAge + time.Nanosecond)
+	mustRefuse(t, m, pickRequest(m, 0), "usage_unknown_or_stale")
+}
+
+func TestFailureCooldownsEndExactlyOnTimeInBothModes(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		wait   time.Duration
+	}{{401, 5 * time.Minute}, {403, 5 * time.Minute}, {402, 30 * time.Second}, {429, 30 * time.Second}} {
+		for _, raw := range []string{`{}`, `{"stayWithinIncluded":false}`} {
+			m, now, _ := configured(t, raw)
+			start := *now
+			r := pickRequest(m, 0)
+			m.pollOnce(context.Background(), true)
+			mustAdmit(t, m, r)
+			if err := m.HandleUsage(context.Background(), pluginapi.UsageRecord{AuthID: r.Candidates[0].ID, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: tc.status}}); err != nil {
+				t.Fatal(err)
+			}
+			// Re-poll so a stale reading cannot mask or stand in for the cooldown.
+			*now = start.Add(tc.wait - time.Nanosecond)
+			m.pollOnce(context.Background(), true)
+			mustRefuse(t, m, r, "provider_cooldown")
+			*now = start.Add(tc.wait)
+			m.pollOnce(context.Background(), true)
+			mustAdmit(t, m, r)
+		}
+	}
+}
+
 func TestIncludedOnlyUnknownStaleAndBoundary(t *testing.T) {
 	m, now, _ := configured(t, `{}`)
 	r := pickRequest(m, 0)
@@ -106,6 +180,7 @@ func TestTogglePAYGBypassesIncludedGateButNotUnknownCredential(t *testing.T) {
 
 func TestNoAutoResetAtMidnightUntilFreshReading(t *testing.T) {
 	m, now, _ := configured(t, `{}`)
+	*now = utcDay(*now).Add(23 * time.Hour) // still in flight at midnight
 	m.pollOnce(context.Background(), true)
 	r := pickRequest(m, 0)
 	if _, err := m.Pick(context.Background(), r); err != nil {

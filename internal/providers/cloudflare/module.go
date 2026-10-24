@@ -20,6 +20,7 @@ import (
 
 type lane struct {
 	account      string
+	provider     string
 	bound        bool
 	busyUntil    time.Time
 	reservations map[string]float64
@@ -34,16 +35,33 @@ type account struct {
 }
 
 type budget struct {
-	Day            string               `json:"day"`
-	Committed      float64              `json:"committed_neurons"`
-	Carry          float64              `json:"in_flight_batch_neurons"`
-	UnsafeDay      string               `json:"payg_day,omitempty"`
-	UnboundedBatch bool                 `json:"unbounded_batch"`
-	Pending        map[string][]float64 `json:"pending_reservations"`
+	Day            string                    `json:"day"`
+	Committed      float64                   `json:"committed_neurons"`
+	Carry          float64                   `json:"in_flight_batch_neurons"`
+	UnsafeDay      string                    `json:"payg_day,omitempty"`
+	UnboundedBatch bool                      `json:"unbounded_batch"`
+	Pending        map[string][]pendingEntry `json:"pending_reservations"`
 }
+
+// A zero-neuron entry is an unbounded PAYG admission.
+type pendingEntry struct {
+	Neurons    float64   `json:"neurons"`
+	AdmittedAt time.Time `json:"admitted_at"`
+}
+
+// Usage callbacks are best-effort: a crash or dropped notification would
+// otherwise pin its entry forever, so the batch never drains, every rollover
+// re-carries it and a PAYG entry fences included traffic permanently. An
+// entry is treated as completed this long after admission, well past any
+// request the host keeps open.
+const pendingExpiry = 6 * time.Hour
+
+// Labels give accounts display names that never change or get reused when
+// accounts are added or removed, so usage history keeps its attribution.
 type diskState struct {
 	Version  int                `json:"version"`
 	Accounts map[string]*budget `json:"accounts"`
+	Labels   map[string]int     `json:"labels,omitempty"`
 }
 
 // Module is a local routing guard, NOT a Cloudflare billing/spend-cap API.
@@ -56,6 +74,8 @@ type Module struct {
 	lanes      map[string]*lane
 	accounts   map[string]*account
 	budgets    map[string]*budget
+	labels     map[string]int
+	retired    map[string]string
 	providers  map[string]bool
 	store      *securestore.Store
 	stateErr   string
@@ -72,6 +92,7 @@ type Module struct {
 
 var _ providermodule.Module = (*Module)(nil)
 var _ providermodule.UsageAttributor = (*Module)(nil)
+var _ providermodule.UsageRecognizer = (*Module)(nil)
 
 func NewModule() *Module             { return &Module{now: func() time.Time { return time.Now().UTC() }} }
 func (m *Module) ID() string         { return providerID }
@@ -129,7 +150,7 @@ func (m *Module) Reconfigure(_ context.Context, host providermodule.HostConfig, 
 			if n > 0 {
 				auth += fmt.Sprintf("-%d", n)
 			}
-			lanes[auth] = &lane{account: id, bound: bound, reservations: reservations}
+			lanes[auth] = &lane{account: id, provider: name, bound: bound, reservations: reservations}
 			if accounts[id] == nil || accounts[id].token == "" {
 				token := ""
 				if bound {
@@ -169,8 +190,12 @@ func (m *Module) Reconfigure(_ context.Context, host providermodule.HostConfig, 
 			if !exists {
 				state = diskState{Version: 1, Accounts: map[string]*budget{}}
 			}
+			if state.Labels == nil {
+				state.Labels = map[string]int{}
+			}
 			m.store = store
 			m.budgets = state.Accounts
+			m.labels = state.Labels
 		}
 	}
 	for id, a := range accounts {
@@ -189,10 +214,52 @@ func (m *Module) Reconfigure(_ context.Context, host providermodule.HostConfig, 
 	if m.budgets == nil {
 		m.budgets = map[string]*budget{}
 	}
+	if m.labels == nil {
+		m.labels = map[string]int{}
+	}
+	// A key change gives a lane a new auth ID while its admitted requests are
+	// still running; keep the old ID resolvable until their callbacks drain it.
+	retired := map[string]string{}
+	for auth, id := range m.retired {
+		retired[auth] = id
+	}
+	for auth, l := range m.lanes {
+		retired[auth] = l.account
+	}
+	for auth, id := range retired {
+		if lanes[auth] != nil || m.budgets[id] == nil || len(m.budgets[id].Pending[auth]) == 0 {
+			delete(retired, auth)
+		}
+	}
 	m.cfg = cfg
 	m.providers = providers
 	m.lanes = lanes
 	m.accounts = accounts
+	m.retired = retired
+	if m.store != nil {
+		ids := make([]string, 0, len(accounts))
+		for id := range accounts {
+			if m.labels[id] == 0 {
+				ids = append(ids, id)
+			}
+		}
+		if len(ids) > 0 {
+			sort.Strings(ids)
+			next := 1
+			for _, n := range m.labels {
+				if n >= next {
+					next = n + 1
+				}
+			}
+			for _, id := range ids {
+				m.labels[id] = next
+				next++
+			}
+			// A failed write sets stateErr, which blocks admission until a
+			// later write succeeds and persists these labels too.
+			m.saveLocked()
+		}
+	}
 	m.generation++
 	if host.Clock != nil {
 		m.now = host.Clock.Now
@@ -214,6 +281,13 @@ func (m *Module) Reconfigure(_ context.Context, host providermodule.HostConfig, 
 func validState(s diskState) bool {
 	if s.Version != 1 || s.Accounts == nil {
 		return false
+	}
+	used := map[int]bool{}
+	for id, n := range s.Labels {
+		if !accountRE.MatchString(id) || n < 1 || used[n] {
+			return false
+		}
+		used[n] = true
 	}
 	for id, b := range s.Accounts {
 		if !accountRE.MatchString(id) || b == nil || !finiteNonnegative(b.Committed) || !finiteNonnegative(b.Carry) {
@@ -237,11 +311,11 @@ func validState(s diskState) bool {
 			if auth == "" || len(queue) == 0 {
 				return false
 			}
-			for _, n := range queue {
-				if !finiteNonnegative(n) || n == 0 && !b.UnboundedBatch {
+			for _, e := range queue {
+				if !finiteNonnegative(e.Neurons) || e.Neurons == 0 && !b.UnboundedBatch || e.AdmittedAt.IsZero() {
 					return false
 				}
-				pending += n
+				pending += e.Neurons
 			}
 		}
 		if !finiteNonnegative(pending) || b.Carry < pending {
@@ -256,20 +330,55 @@ func (m *Module) budgetLocked(id string, now time.Time) *budget {
 	day := utcDay(now).Format("2006-01-02")
 	b := m.budgets[id]
 	if b == nil {
-		b = &budget{Day: day, Pending: map[string][]float64{}}
+		b = &budget{Day: day, Pending: map[string][]pendingEntry{}}
 		m.budgets[id] = b
 	}
 	if b.Pending == nil {
-		b.Pending = map[string][]float64{}
+		b.Pending = map[string][]pendingEntry{}
 	}
 	if b.Day != day {
+		// Entries assumed complete strictly before today began are not carried
+		// into it.
+		expirePending(b, utcDay(now).Add(-time.Nanosecond))
 		// Callbacks contain no unique request identifier and may finish out of
 		// order. Carry the ENTIRE active batch until every callback has arrived,
 		// rather than subtracting the wrong request's reservation at midnight.
 		b.Day = day
 		b.Committed = b.Carry
 	}
+	expirePending(b, now)
 	return b
+}
+
+// expirePending treats entries whose expiry instant is not after cutoff as
+// completed at that instant, exactly like a usage callback for them.
+func expirePending(b *budget, cutoff time.Time) {
+	expired := false
+	for auth, queue := range b.Pending {
+		var keep []pendingEntry
+		for _, e := range queue {
+			done := e.AdmittedAt.Add(pendingExpiry)
+			if done.After(cutoff) {
+				keep = append(keep, e)
+				continue
+			}
+			expired = true
+			// Callback order cannot identify which member of a mixed batch was
+			// unbounded, so any expiry fences the day it may have completed on.
+			if day := utcDay(done).Format("2006-01-02"); b.UnboundedBatch && day > b.UnsafeDay {
+				b.UnsafeDay = day
+			}
+		}
+		if len(keep) == 0 {
+			delete(b.Pending, auth)
+		} else {
+			b.Pending[auth] = keep
+		}
+	}
+	if expired && len(b.Pending) == 0 {
+		b.Carry = 0
+		b.UnboundedBatch = false
+	}
 }
 
 func (m *Module) saveLocked() bool {
@@ -277,7 +386,7 @@ func (m *Module) saveLocked() bool {
 		m.stateErr = "state_unavailable"
 		return false
 	}
-	if err := m.store.WriteJSON("budget.json", diskState{Version: 1, Accounts: m.budgets}); err != nil {
+	if err := m.store.WriteJSON("budget.json", diskState{Version: 1, Accounts: m.budgets, Labels: m.labels}); err != nil {
 		m.stateErr = "state_write_failed"
 		return false
 	}
@@ -326,10 +435,6 @@ func (m *Module) Pick(_ context.Context, req pluginapi.SchedulerPickRequest) (pl
 		}
 	}
 	now := m.now().UTC()
-	model := req.Model
-	for p := range m.providers {
-		model = strings.TrimPrefix(model, p+"/")
-	}
 	ids := make([]string, 0, len(req.Candidates))
 	for _, c := range req.Candidates {
 		ids = append(ids, c.ID)
@@ -348,7 +453,8 @@ func (m *Module) Pick(_ context.Context, req pluginapi.SchedulerPickRequest) (pl
 		}
 		a := m.accounts[l.account]
 		b := m.budgetLocked(l.account, now)
-		reserve := l.reservations[model]
+		reserve := l.reservations[routeKey(l.provider, req.Model)]
+		queue := b.Pending[id]
 		if m.cfg.StayWithinIncluded {
 			switch {
 			case b.UnsafeDay == b.Day || b.UnboundedBatch:
@@ -371,25 +477,43 @@ func (m *Module) Pick(_ context.Context, req pluginapi.SchedulerPickRequest) (pl
 				continue
 			}
 			// Never refund local debits based on delayed analytics or token usage.
+			committed, carry := b.Committed, b.Carry
 			b.Committed += reserve
 			b.Carry += reserve
-			b.Pending[id] = append(b.Pending[id], reserve)
+			b.Pending[id] = append(queue, pendingEntry{Neurons: reserve, AdmittedAt: now})
 			if !m.saveLocked() {
+				b.Committed, b.Carry = committed, carry
+				restoreQueue(b, id, queue)
 				return pluginapi.SchedulerPickResponse{}, capacityError("state_unavailable")
 			}
 		} else {
 			// Unbounded PAYG work can be absent from delayed analytics. Switching
 			// back cannot unlock included traffic until the UTC day after the
-			// whole active batch completes. Persist across plugin restarts.
+			// whole active batch completes. The fence must be durable before
+			// dispatch: a restart that forgot it would trust an analytics
+			// reading that does not yet show this request.
+			unsafeDay, unbounded := b.UnsafeDay, b.UnboundedBatch
 			b.UnsafeDay = b.Day
 			b.UnboundedBatch = true
-			b.Pending[id] = append(b.Pending[id], 0)
-			m.saveLocked() // PAYG is allowed even if metering/storage is unavailable.
+			b.Pending[id] = append(queue, pendingEntry{AdmittedAt: now})
+			if !m.saveLocked() {
+				b.UnsafeDay, b.UnboundedBatch = unsafeDay, unbounded
+				restoreQueue(b, id, queue)
+				return pluginapi.SchedulerPickResponse{}, capacityError("state_unavailable")
+			}
 		}
 		m.cursor++
 		return pluginapi.SchedulerPickResponse{Handled: true, AuthID: id}, nil
 	}
 	return pluginapi.SchedulerPickResponse{}, capacityError(reason)
+}
+
+func restoreQueue(b *budget, id string, queue []pendingEntry) {
+	if len(queue) == 0 {
+		delete(b.Pending, id)
+	} else {
+		b.Pending[id] = queue
+	}
 }
 
 type schedulerError struct{ reason string }
@@ -406,17 +530,37 @@ func (m *Module) UsageAccount(r pluginapi.UsageRecord) string {
 	if l := m.lanes[r.AuthID]; l != nil {
 		return m.accountNameLocked(l.account)
 	}
+	if id := m.retired[r.AuthID]; id != "" {
+		return m.accountNameLocked(id)
+	}
 	return ""
 }
 func (m *Module) accountNameLocked(id string) string {
-	ids := make([]string, 0, len(m.accounts))
-	for id := range m.accounts {
-		ids = append(ids, id)
+	if n := m.labels[id]; n > 0 {
+		return fmt.Sprintf("workers-ai#%d", n)
 	}
-	sort.Strings(ids)
-	for i, value := range ids {
-		if value == id {
-			return fmt.Sprintf("workers-ai#%d", i+1)
+	return ""
+}
+
+// RecognizeUsage claims callbacks for an auth ID retired by a key change
+// while its admitted requests were still pending; the coordinator registry
+// only knows the current IDs.
+func (m *Module) RecognizeUsage(r pluginapi.UsageRecord) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.activeLocked() && m.retiredAccountLocked(r.AuthID) != ""
+}
+
+func (m *Module) retiredAccountLocked(auth string) string {
+	if id := m.retired[auth]; id != "" {
+		return id
+	}
+	// After a restart only the durable budget remembers the old ID. An auth
+	// ID hashes its base URL, so it belongs to exactly one account.
+	for id, b := range m.budgets {
+		if len(b.Pending[auth]) > 0 {
+			m.retired[auth] = id
+			return id
 		}
 	}
 	return ""
@@ -429,10 +573,13 @@ func (m *Module) HandleUsage(_ context.Context, r pluginapi.UsageRecord) error {
 		return nil
 	}
 	l := m.lanes[r.AuthID]
-	if l == nil {
+	account := ""
+	if l != nil {
+		account = l.account
+	} else if account = m.retiredAccountLocked(r.AuthID); account == "" {
 		return nil
 	}
-	b := m.budgetLocked(l.account, m.now())
+	b := m.budgetLocked(account, m.now())
 	if queue := b.Pending[r.AuthID]; len(queue) > 0 {
 		if b.UnboundedBatch {
 			// A PAYG request can finish after midnight and be absent from the
@@ -451,7 +598,7 @@ func (m *Module) HandleUsage(_ context.Context, r pluginapi.UsageRecord) error {
 		}
 		m.saveLocked()
 	}
-	if r.Failed {
+	if l != nil && r.Failed {
 		// A 429 can be the model's RPM limit, not the daily neuron budget. Do not
 		// invent a midnight quota reset from that status or upstream error text.
 		switch r.Failure.StatusCode {

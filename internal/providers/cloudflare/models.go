@@ -51,9 +51,23 @@ func reservationFor(model string) (float64, bool) {
 	return 0, false
 }
 
+// routeKey folds a requested or configured route the way the host matches
+// aliases and upstream names (strings.EqualFold), then drops only the owning
+// provider's own prefix. Another provider's prefix stays part of the route:
+// on this provider "other/x" is a distinct alias that may name a costlier
+// upstream than "x".
+func routeKey(provider, raw string) string {
+	key := providermodule.ModelKey(strings.TrimSpace(raw))
+	if prefix := providermodule.ModelKey(provider + "/"); strings.HasPrefix(key, prefix) {
+		key = key[len(prefix):]
+	}
+	return key
+}
+
 // Bind reservations to the host's actual upstream, not a cheap-looking alias.
 // A zero entry is unbounded. Conflicting aliases keep the highest reservation,
-// or remain unbounded if any possible upstream is unknown/multimodal.
+// or remain unbounded if any possible upstream is unknown/multimodal. Keys are
+// routeKey values, so case variants the host pools together share one entry.
 func configuredReservations(provider string, models []providermodule.OpenAICompatibilityModel) map[string]float64 {
 	out := map[string]float64{}
 	for _, configured := range models {
@@ -66,7 +80,7 @@ func configuredReservations(provider string, models []providermodule.OpenAICompa
 			}
 		}
 		for _, raw := range []string{upstream, configured.Alias} {
-			key := strings.TrimPrefix(strings.TrimSpace(raw), provider+"/")
+			key := routeKey(provider, raw)
 			if key == "" {
 				continue
 			}

@@ -198,7 +198,7 @@ func (m *Module) reason(l lane, model string, now time.Time) string {
 	if m.cfg.FreeRequestLimit > 0 && m.state.Reserved >= m.cfg.FreeRequestLimit {
 		return "free_exhausted"
 	}
-	if len(l.models) == 0 || (model != "" && !l.models[model]) {
+	if len(l.models) == 0 || (model != "" && !l.models[providermodule.ModelKey(model)]) {
 		return "unverified_model"
 	}
 	return ""

@@ -3,6 +3,7 @@ package cloudflare
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/TogetherWeOwn/cpa-plugin-subscription-pool/internal/providermodule"
@@ -22,6 +23,48 @@ func TestIncludedReservationUsesConfiguredUpstreamNotAliasSpelling(t *testing.T)
 			}
 		})
 	}
+}
+
+func TestCaseVariantAliasCannotBorrowACheaperReservation(t *testing.T) {
+	cheap := providermodule.OpenAICompatibilityModel{Name: "@cf/qwen/qwen3-30b-a3b-fp8", Alias: providerID + "/step"}
+	m, _, h := configured(t, `{}`)
+	h.OpenAICompatibility[0].Models = []providermodule.OpenAICompatibilityModel{cheap}
+	reconfigure(t, m, h, `{}`)
+	m.pollOnce(context.Background(), true)
+	mustAdmit(t, m, pickModel(m, 0, strings.ToUpper(providerID)+"/STEP")) // the host matches case-insensitively
+	// The host pools every fold-equal alias, so the costlier upstream must
+	// bound each spelling regardless of configuration order.
+	for _, variant := range []string{"STEP", "Step", "ſtep"} {
+		costly := providermodule.OpenAICompatibilityModel{Name: "@cf/openai/gpt-oss-120b", Alias: providerID + "/" + variant}
+		for _, models := range [][]providermodule.OpenAICompatibilityModel{{cheap, costly}, {costly, cheap}} {
+			m, _, h := configured(t, `{}`)
+			h.OpenAICompatibility[0].Models = models
+			reconfigure(t, m, h, `{}`)
+			m.pollOnce(context.Background(), true)
+			for _, model := range []string{providerID + "/step", providerID + "/" + variant, strings.ToUpper(providerID) + "/step", "step"} {
+				mustRefuse(t, m, pickModel(m, 0, model), "included_exhausted")
+			}
+		}
+	}
+}
+
+func TestAnotherProvidersPrefixIsPartOfTheRoute(t *testing.T) {
+	other := providerID + "-other"
+	m, _, h := configured(t, `{}`)
+	h.OpenAICompatibility[0].Models = []providermodule.OpenAICompatibilityModel{
+		{Name: "@cf/qwen/qwen3-30b-a3b-fp8", Alias: providerID + "/qwen3-30b-a3b-fp8"},
+		{Name: "@cf/openai/gpt-oss-120b", Alias: other + "/qwen3-30b-a3b-fp8"},
+	}
+	reconfigure(t, m, h, `{"providers":["`+providerID+`","`+other+`"]}`)
+	m.pollOnce(context.Background(), true)
+	mustRefuse(t, m, pickModel(m, 0, other+"/qwen3-30b-a3b-fp8"), "included_exhausted")
+	m.mu.Lock()
+	debited := m.budgetLocked(testAccount, m.now()).Committed
+	m.mu.Unlock()
+	if debited != 0 {
+		t.Fatalf("refused request debited %v neurons", debited)
+	}
+	mustAdmit(t, m, pickModel(m, 0, providerID+"/qwen3-30b-a3b-fp8"))
 }
 
 func TestStatusUsesConfiguredModelsForRemainingHeadroom(t *testing.T) {
