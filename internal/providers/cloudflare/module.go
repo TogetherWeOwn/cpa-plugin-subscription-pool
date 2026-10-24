@@ -122,7 +122,7 @@ func (m *Module) Reconfigure(_ context.Context, host providermodule.HostConfig, 
 			key := strings.TrimSpace(entry.APIKey)
 			bound := key != "" && !strings.ContainsAny(key, "<>$ {}") && !strings.Contains(strings.ToLower(key), "placeholder")
 			kind := "openai-compatibility:" + name
-			h := sha256.Sum256([]byte(kind + "\x00" + key + "\x00" + strings.TrimSpace(compat.BaseURL) + "\x00" + strings.TrimSpace(entry.ProxyURL)))
+			h := sha256.Sum256([]byte(kind + "\x00" + key + "\x00" + strings.TrimSpace(compat.BaseURL) + "\x00" + strings.TrimSpace(entry.ProxyURL))) // codeql[go/weak-sensitive-data-hashing] Upstream non-security ID contract.
 			auth := kind + ":" + hex.EncodeToString(h[:])[:12]
 			n := counters[auth]
 			counters[auth]++

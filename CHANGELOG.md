@@ -157,7 +157,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - State and settings commits are atomic, redacted, and recovered fail-closed after interrupted writes.
 
 [Unreleased]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/compare/v0.7.0...HEAD
-[0.7.0]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/compare/v0.6.1...v0.7.0
+[0.7.0]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/releases/tag/v0.7.0
 [0.6.1]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/releases/tag/v0.6.1
 [0.6.0]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/releases/tag/v0.6.0
 [0.5.0]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/releases/tag/v0.5.0

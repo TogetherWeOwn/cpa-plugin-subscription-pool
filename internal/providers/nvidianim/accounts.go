@@ -57,7 +57,7 @@ func discover(host providermodule.HostConfig, cfg moduleConfig) map[string]lane 
 			if len(compat.APIKeyEntries) == 0 {
 				parts = []string{compat.BaseURL}
 			}
-			h := sha256.New()
+			h := sha256.New() // codeql[go/weak-sensitive-data-hashing] Upstream non-security ID contract.
 			h.Write([]byte(kind))
 			for _, p := range parts {
 				h.Write([]byte{0})
