@@ -34,9 +34,11 @@ const (
 )
 
 var providerLabels = map[string]string{
-	"zai":         "Z.ai",
-	"opencode-go": "OpenCode Go",
-	"synthetic":   "synthetic.new",
+	"zai":                   "Z.ai",
+	"opencode-go":           "OpenCode Go",
+	"synthetic":             "synthetic.new",
+	"cloudflare-workers-ai": "Cloudflare Workers AI",
+	"nvidia-nim":            "NVIDIA NIM",
 }
 
 func providerLabel(id string) string {
@@ -263,6 +265,10 @@ func (c *Coordinator) buildUsagePageData(rangeID string, authenticated bool) usa
 			cards = zaiQuotaCards(raw)
 		case "opencode-go":
 			cards = opencodeQuotaCards(raw)
+		case "cloudflare-workers-ai":
+			cards = cloudflareQuotaCards(raw)
+		case "nvidia-nim":
+			cards = nvidiaQuotaCards(raw)
 		case "synthetic":
 			var panel *syntheticPanel
 			cards, panel = syntheticQuotaCards(raw, now)

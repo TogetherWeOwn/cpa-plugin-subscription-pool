@@ -8,6 +8,16 @@ claude-api-key:
     prefix: zai
 
 openai-compatibility:
+  # NVIDIA is initially blocked until account/model entitlement and permitted
+  # trial use are verified below. Catalog presence alone is not free entitlement.
+  - name: nvidia-nim
+    disabled: true
+    base-url: https://integrate.api.nvidia.com/v1
+    api-key-entries:
+      - api-key: ${NVIDIA_NIM_API_KEY}
+    models:
+      - name: z-ai/glm-5.3-flash
+        alias: nvidia-nim/glm-5.3-flash
   - name: zai-coding-plan
     base-url: https://api.z.ai/api/coding/paas/v4
     api-key-entries:
@@ -35,6 +45,58 @@ openai-compatibility:
       - name: "hf:moonshotai/Kimi-K3"
         alias: synthetic/kimi-k3
 
+  # Render these placeholders through the operator's secret channel first;
+  # CLIProxy does not expand shell variables. Keep disabled until the scoped
+  # token, live GraphQL schema and single-scheduler ownership are verified.
+  - name: cloudflare-workers-ai
+    disabled: true
+    base-url: https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/ai/v1
+    api-key-entries:
+      - api-key: ${CLOUDFLARE_WORKERS_AI_TOKEN}
+    models:
+      - name: "@cf/qwen/qwen3-30b-a3b-fp8"
+        alias: cloudflare-workers-ai/qwen3-30b-a3b-fp8
+        max-context-length: 32768
+        input-modalities: [text]
+        thinking: {} # no verified reasoning_effort levels
+      - name: "@cf/zai-org/glm-4.7-flash"
+        alias: cloudflare-workers-ai/glm-4.7-flash
+        max-context-length: 131072
+        input-modalities: [text]
+        thinking: {}
+      # Larger/multimodal models below are deliberately refused by the
+      # included-only scheduler. stayWithinIncluded: false allows PAYG.
+      - name: "@cf/openai/gpt-oss-120b"
+        alias: cloudflare-workers-ai/gpt-oss-120b
+        max-context-length: 128000
+        input-modalities: [text]
+        thinking: {levels: [low, medium, high]}
+      - name: "@cf/zai-org/glm-5.3"
+        alias: cloudflare-workers-ai/glm-5.3
+        max-context-length: 1048576
+        input-modalities: [text, image]
+        thinking: {levels: [low, high, max]}
+      - name: "@cf/zai-org/glm-5.3-flash"
+        alias: cloudflare-workers-ai/glm-5.3-flash
+        max-context-length: 1048576
+        input-modalities: [text, image]
+        thinking: {levels: [low, high, max]}
+      - name: "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+        alias: cloudflare-workers-ai/deepseek-v4.1-flash-1017
+        max-context-length: 1048576
+        input-modalities: [text, image]
+        thinking: {levels: [none, low, high, max]}
+      - name: "@cf/moonshotai/kimi-k2.7-code"
+        alias: cloudflare-workers-ai/kimi-k2.7-code
+        max-context-length: 262144
+        input-modalities: [text, image]
+        thinking: {}
+      - name: "@cf/qwen/qwen3.8-27b"
+        alias: cloudflare-workers-ai/qwen3.8-27b
+        max-context-length: 262144
+        input-modalities: [text, image]
+        thinking: {levels: [low, medium, xhigh]}
+
 plugins:
   enabled: true
   dir: plugins
@@ -44,6 +106,15 @@ plugins:
       priority: 1000
       cpa-config-path: /app/config.yaml
       providers:
+        nvidia-nim:
+          stayWithinFree: true
+          # Trial/internal evaluation only, no confidential input or production
+          # output. See README's governing-terms links before confirming.
+          free-tier-confirmed: false
+          requests-per-minute: 0  # unknown, so free-only admission is blocked
+          free-models: []         # verified exact upstream IDs, not aliases
+          free-request-limit: 0  # optional local lifetime ceiling, never a credit grant
+          # trial-expires-at: "2026-11-01T00:00:00Z"  # only the account's actual expiry
         zai:
           quota-refresh-interval: 2m
           authoritative-max-age: 5m
@@ -89,3 +160,10 @@ plugins:
           # Defaults shown; rename only if your providers use other names.
           paid-providers: [synthetic]
           infinite-providers: [synthetic-infinite]
+        cloudflare-workers-ai:
+          enabled: true
+          stayWithinIncluded: true # false explicitly permits normal PAYG
+          safety-margin-neurons: 500
+          usage-refresh-interval: 30s
+          usage-max-age: 2m
+          providers: [cloudflare-workers-ai]

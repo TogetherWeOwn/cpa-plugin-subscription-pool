@@ -1,6 +1,10 @@
 package coordinator
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 // TestParseCoordinatorConfigAcceptsHostInjectedFields pins the actual host
 // contract: pluginhost's normalizedConfigNode (both v7.2.150 and v7.2.157)
@@ -19,6 +23,22 @@ func TestParseCoordinatorConfigAcceptsHostInjectedFields(t *testing.T) {
 	}
 	if _, ok := cfg.Providers["zai"]; !ok {
 		t.Fatal("providers.zai missing after parsing host-injected config")
+	}
+}
+
+func TestHostProjectionPreservesModelAliasBinding(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	raw := "openai-compatibility:\n  - name: cloudflare-workers-ai\n    base-url: https://api.cloudflare.com/client/v4/accounts/0123456789abcdef0123456789abcdef/ai/v1\n    api-key-entries:\n      - api-key: test-only-key\n    models:\n      - name: '@cf/openai/gpt-oss-120b'\n        alias: cloudflare-workers-ai/qwen3-30b-a3b-fp8\n"
+	if err := os.WriteFile(path, []byte(raw), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadHostCPAConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	models := cfg.OpenAICompatibility[0].Models
+	if len(models) != 1 || models[0].Name != "@cf/openai/gpt-oss-120b" || models[0].Alias != "cloudflare-workers-ai/qwen3-30b-a3b-fp8" {
+		t.Fatalf("cost guard lost the real upstream behind an alias: %+v", models)
 	}
 }
 

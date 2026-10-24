@@ -35,8 +35,19 @@ jobs:
       - name: Resolve immutable image matrix
         run: .github/scripts/resolve-host-images.sh > "$RUNNER_TEMP/host-images.json"
       - name: Build plugin
-        run: make build VERSION=0.6.1 OUT=dist/subscription-pool-v0.6.1.so
+        run: make build VERSION=0.7.0 OUT=dist/subscription-pool-v0.7.0.so
       - name: Run compatibility matrix
         env:
           HOST_MATRIX_NAMESPACE: root
-        run: sudo --preserve-env=HOST_MATRIX_NAMESPACE make test-host-matrix VERSION=0.6.1 OUT=dist/subscription-pool-v0.6.1.so HOST_IMAGES="$RUNNER_TEMP/host-images.json" HOST_MATRIX_WORK="$RUNNER_TEMP/host-matrix"
+          SP_CLOUDFLARE_PAGE_OUT: ${{ runner.temp }}/cloudflare-page
+        run: sudo --preserve-env=HOST_MATRIX_NAMESPACE,SP_CLOUDFLARE_PAGE_OUT make test-host-matrix VERSION=0.7.0 OUT=dist/subscription-pool-v0.7.0.so HOST_IMAGES="$RUNNER_TEMP/host-images.json" HOST_MATRIX_WORK="$RUNNER_TEMP/host-matrix"
+      # The matrix exports the quota page a real host served; render it in a
+      # browser at desktop and mobile sizes. A missing export fails the step.
+      - name: Check Cloudflare quota page in a browser
+        run: |
+          sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/cloudflare-page"
+          mkdir -p "$RUNNER_TEMP/playwright"
+          cd "$RUNNER_TEMP/playwright"
+          npm install --no-save --no-package-lock --ignore-scripts playwright@1.64.1
+          npx --no-install playwright install --with-deps chromium
+          NODE_PATH="$RUNNER_TEMP/playwright/node_modules" node "$GITHUB_WORKSPACE/.github/scripts/check-cloudflare-page.cjs" "$RUNNER_TEMP/cloudflare-page"

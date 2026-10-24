@@ -9,6 +9,8 @@
 | `zai` | Z.AI Coding Plan | pairs each key's Anthropic and OpenAI-compatible credentials, tracks the five-hour and weekly quota, keeps impaired accounts out of scheduling |
 | `opencode-go` | OpenCode Go | quota-aware account pooling from the usage dashboard and observed 429s |
 | `synthetic` | synthetic.new | weekly-credit threshold scheduling, optional concurrency caps, and automatic fallback to the free infinite mode ([details](#syntheticnew)) |
+| `cloudflare-workers-ai` | Cloudflare Workers AI | account-wide daily neuron guard, conservative durable reservations, and explicit PAYG opt-in ([details](#cloudflare-workers-ai)) |
+| `nvidia-nim` | NVIDIA-hosted NIM / compatible paid NIM endpoint | default-on free-only model/endpoint guard, durable local request reservations and shared RPM safety cap ([details](#nvidia-nim)) |
 
 Modules with nothing configured are inactive and leave their providers to CLIProxyAPI's own scheduler. This repository was previously named `cpa-plugin-zai-coding-plan`.
 
@@ -30,12 +32,12 @@ The official plugin list shows **Subscription Pool: Z.ai · OpenCode Go · synth
 ## Requirements
 
 - Linux amd64
-- CLIProxyAPI v7.2.x with native plugin ABI version 1 and plugin schema version 5 (SDK v7.2.154; v7.2.67 hosts accept only schema 1 and cannot load this plugin)
+- a CLIProxyAPI host accepting native plugin ABI 1 and schema 5 (SDK v7.2.154; baseline v7.2.150, with newer v8 hosts covered by the exact-image gates; v7.2.67 accepts only schema 1 and cannot load this plugin)
 - exactly one enabled scheduler plugin, with `subscription-pool` configured at priority `1000`
-- credentials for at least one of Z.ai Coding Plan, OpenCode Go or synthetic.new, used under that provider's subscription terms (unconfigured modules remain inactive)
+- credentials for at least one configured module, used under that provider's actual account/model entitlement and terms (unconfigured modules remain inactive; NVIDIA trial rights are not production rights)
 - Go 1.26 and a GCC-compatible C toolchain only when building from source
 
-The supported host range is CLIProxyAPI v7.2.150 through the newest `eceasy/cli-proxy-api` v7.2.x tag that passes the compatibility matrix. CI always tests the v7.2.150 baseline, the operator-recorded deployed image, and the latest published tag. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the pinned SDK, ABI, scheduler-exclusivity, persistence, and threat-model contracts.
+The supported baseline is CLIProxyAPI v7.2.150. Newer stock versions, including v8, must pass the immutable compatibility matrix; a patched production image additionally requires its own isolated preflight. CI always tests the v7.2.150 baseline, the operator-recorded deployed-evidence image, and the latest published stock tag. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the pinned SDK, ABI, scheduler-exclusivity, persistence, and threat-model contracts.
 
 ## synthetic.new
 
@@ -76,13 +78,89 @@ Behavior:
 - Weekly usage comes from `GET /v2/quotas` and the `x-synthetic-quotas` response header and is projected through the documented regeneration (2% every 202 minutes). Placeholder keys (for example `<API KEY PLACEHOLDER>`) are never sent anywhere; the lanes show `health: unbound` until a real key is configured.
 - `GET /v0/management/plugins/subscription-pool/status` -> `providers.synthetic.accounts[].stats` reports measured output tokens per second and time to first token per lane, so infinite-mode speed can be compared with the paid lane.
 
+## Cloudflare Workers AI
+
+The module defaults to `stayWithinIncluded: true`. The example host provider is **disabled** until its scoped credential and account analytics schema have been verified. Activation also requires the exact-source review/release and immutable-host gates.
+
+Cloudflare includes **10,000 neurons per account per day**, on both Workers Free and Workers Paid. The daily allowance resets at **00:00 UTC** and does not roll over. There is no documented additional monthly Workers AI pool with Workers Paid. In October, 31 daily allowances total 310,000 neurons (a $3.41 overage-price equivalent), **not a spendable monthly credit**. Paid overage is $0.011 per 1,000 neurons; the existing Workers Paid subscription starts at $5/account/month and is separate. [Workers AI pricing](https://developers.cloudflare.com/workers-ai/platform/pricing/) · [Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/).
+
+```yaml
+plugins:
+  configs:
+    subscription-pool:
+      providers:
+        cloudflare-workers-ai:
+          enabled: true
+          stayWithinIncluded: true       # false explicitly permits PAYG
+          safety-margin-neurons: 500
+          usage-refresh-interval: 30s
+          usage-max-age: 2m
+          providers: [cloudflare-workers-ai]
+```
+
+Use the **account-scoped** OpenAI base `https://api.cloudflare.com/client/v4/accounts/<account-id>/ai/v1`; do not append another `/v1`. The full prefixed model entries and served contexts are in [`config.example.yaml`](config.example.yaml); [`deploy/config.yaml.tmpl`](deploy/config.yaml.tmpl) starts with the two bounded text models. Render secret placeholders through the operator's supported channel before applying, keep populated config mode `0600`, and never log it. Do not assume shell-variable expansion by CLIProxyAPI.
+
+Guard behavior:
+
+- All keys pointing at one Cloudflare account share one daily budget. The scheduler refuses unknown, stale, malformed or permission-denied analytics, unbound credentials, unpriced/unbounded models, and requests that cannot fit the safety margin plus the full reservation. Errors are retryable `cloudflare_no_capacity` (429). A model RPM 429 is a brief cooldown, not invented daily exhaustion.
+- Because this SDK's scheduler does not receive the body or requested token limits, included-only mode reserves **the full served text context for both input and output**, at uncached published neuron rates, before dispatch. The reservation is bound to each host model entry's actual upstream ID, not the spelling of its alias; missing or unbounded mappings fail closed. Local debits are durably saved and conservatively **added** to analytics, even when that double-counts completed work. Reservations are not refunded from token estimates. Qwen3 30B reserves 1,151 neurons/request; GLM 4.7 Flash reserves 5,492. Larger or multimodal catalog models are PAYG-only under this guard; no quality/routing threshold is lowered to admit them.
+- State is atomic under the plugin's auth directory, `providers/cloudflare-workers-ai/budget.json`. Restart does not reset it. An unfinished batch carries its full reservations across midnight until all callbacks arrive; completion order is not assumed. Storage corruption/write failure fails closed. Do not delete state to manufacture capacity.
+- `stayWithinIncluded: false` explicitly bypasses the included-neuron gate for normal PAYG, while credential validation and provider cooldowns remain. After any PAYG request, switching back stays blocked until the UTC day after the whole active batch completes, including when completion crosses midnight. Disabling the guard while a matching host provider remains enabled is rejected; disable the host provider to take it out of service.
+- This is a **local routing guard, not an atomic Cloudflare billing cap**. Adaptive analytics can lag or be sampled, other applications can spend the same account allowance, and independent plugin replicas do not share reservations. Require one active scheduler per account; use Workers Free or a provider-enforced spend cap if an absolute zero-charge guarantee is required.
+
+Analytics uses `https://api.cloudflare.com/client/v4/graphql`, account-wide `aiInferenceAdaptiveGroups.sum.totalNeurons`, filtered to the current UTC date. **The exact live schema/filter and scoped-token permission must be verified before activation**; fixtures are synthetic and schema/permission errors fail closed. Polling sends no inference traffic. The token needs only the chosen account resource, Workers AI Read (the inference API also accepts Workers AI Write) and Account Analytics Read; validate the actual permission-group names through the authorized scoped-token workflow. [Inference permissions](https://developers.cloudflare.com/api/resources/ai/methods/run/) · [Analytics authentication](https://developers.cloudflare.com/analytics/graphql-api/getting-started/authentication/api-token-auth/) · [Sampling caveat](https://developers.cloudflare.com/analytics/graphql-api/sampling/).
+
+The Usage and Quota page shows a daily UTC window, included-only/PAYG mode, measured neurons separately from conservative local debits, the safety reserve, and the calendar projection explicitly labelled not pooled. Account labels are generated; account IDs, auth IDs, keys and upstream diagnostics never reach the public page. A guard pause can happen below 100% because the remaining headroom cannot fit another full reservation.
+
+[OpenAI compatibility](https://developers.cloudflare.com/workers-ai/configuration/open-ai-compatibility/): chat completions and embeddings; streaming and tools depend on the selected model. `/v1/responses` is currently GPT-OSS-only and non-streaming, so coding-agent integration should use chat streaming rather than assume streaming Responses support. Native-model quality scores are not proof of Cloudflare-hosted coding performance; no paid inference or new model-comparison evaluation is required to implement this guard.
+
+## NVIDIA NIM
+
+**Do not enable a live NVIDIA credential before the exact-source release/compatibility gates and account entitlement checks pass.** NVIDIA advertises [free hosted APIs for development and prototyping](https://developer.nvidia.com/nim), not a universal monthly credit grant. The [official FAQ](https://forums.developer.nvidia.com/t/nvidia-nim-faq/300317) says rate limits vary by model and account; inspect the signed-in API Catalog rather than assuming 40 RPM or 1,000 credits. No authoritative remaining-credit API is used by this module.
+
+The [NVIDIA API Trial Terms](https://assets.ngc.nvidia.com/products/api-catalog/legal/NVIDIA%20API%20Trial%20Terms%20of%20Service.pdf), sections 1.2 and 1.4, restrict trial access **and generated content** to internal testing/evaluation, not production. Section 2.6(a) prohibits confidential, controlled or sensitive input. Trial-generated code must not be promoted into a production product under these trial rights. Section 4.6 prohibits unsolicited automated bulk communications; API automation is not an exemption from the other restrictions. A separate NVIDIA or partner subscription is required for production or continued use after available credits. Model licenses and the [Technology Access Terms](https://developer.nvidia.com/legal/terms) also apply. Do not route confidential repositories, normal business production work or real end-user traffic to a free trial merely because a model is listed in the catalog.
+
+A safe, initially blocked configuration is:
+
+```yaml
+openai-compatibility:
+  - name: nvidia-nim
+    base-url: https://integrate.api.nvidia.com/v1
+    api-key-entries:
+      - api-key: ${NVIDIA_NIM_API_KEY}  # illustrative; use the host's supported secret mechanism
+    models:
+      - {name: z-ai/glm-5.3-flash, alias: nvidia-nim/glm-5.3-flash}
+plugins:
+  configs:
+    subscription-pool:
+      providers:
+        nvidia-nim:
+          stayWithinFree: true
+          free-tier-confirmed: false   # change only after verifying account/model entitlement and permitted use
+          requests-per-minute: 0       # unknown: blocked in free-only mode; supply the verified conservative account/model cap
+          free-models: []              # exact upstream model IDs verified free for this account
+          free-request-limit: 0        # optional LOCAL lifetime admission ceiling, not a provider credit balance
+          # trial-expires-at: "2026-11-01T00:00:00Z"  # only if this account actually has that expiry
+```
+
+The example `z-ai/glm-5.3-flash` was present in NVIDIA's public model catalog on 2026-10-24; catalog presence proves neither key validity, free entitlement nor production rights. For free-only admission, explicitly confirm the entitlement, configure a positive verified RPM cap, and allowlist each exact free upstream model ID. The requested alias must map only to free upstream models; ambiguous free/paid aliases are refused. The free endpoint must be exactly HTTPS `integrate.api.nvidia.com/v1` (optional trailing slash/port 443). A placeholder key, unknown credential, expired configured trial, exhausted local ceiling, observed credit exhaustion or unavailable durable state fails closed. All keys share one conservative budget; adding/replacing keys or adding aliases does not mint allowance.
+
+`stayWithinFree: false` explicitly permits a separately authorized paid endpoint or paid models and bypasses only free-specific checks. It **does not purchase a plan, upgrade a trial, grant production rights or authorize a new charge**. Placeholder protection, durable accounting, configured RPM and upstream `Retry-After` remain enforced. `enabled: false` instead removes this module from scheduling and delegates to the host; it is **not** a billing guard.
+
+Reservations are persisted before admission to `<auth-dir>/subscription-pool/providers/nvidia-nim/allowance.state`; failed/retried/interrupted requests count conservatively. Only the rolling 60-second RPM window refills. The optional lifetime ceiling and observed credit or trial exhaustion do not reset on a guessed day/month boundary. A provider 402, or a 429 whose body mentions credits or a trial, sets sticky free exhaustion. Ordinary RPM 429s also mention a quota, so a 429 that mentions a quota or a daily/monthly limit, but not credits or a trial, backs off for at least one hour, durably across restarts, without latching. Generic rate 429s use `Retry-After` (bounded to 24 hours; one minute if absent); a longer `Retry-After` always wins. Credit recovery is operator-controlled: re-verify the actual entitlement first; stop the relevant host, make a mode-0600 backup, and clear only `free_exhausted` in the retained state if warranted. Keep `reserved`/rate history; increase a local ceiling only by an explicitly verified amount. No automatic reset or reset API is provided. Deleting state or changing the auth directory loses the local guard history and must not be used to replenish allowance.
+
+The usage page shows one **NVIDIA shared allowance** card, guard on/off, local reservations, the shared RPM meter and an optional lifetime ceiling. Every meter is labelled **local admissions, not provider balance**; no monthly credit bar, token-to-credit conversion or authoritative balance is invented. Other clients using the NVIDIA account are outside this proxy's observations; isolate the account or leave a conservative margin. Verified configuration is not a guarantee against account-side billing changes, so retain provider-side no-billing controls too.
+
+Owner key instructions are in [`deploy/NVIDIA-OWNER-KEY.txt`](deploy/NVIDIA-OWNER-KEY.txt). [`deploy/nvidia-key-watch.py`](deploy/nvidia-key-watch.py) reads a private `~/secure-drop/nvidia.env` containing `KEY=...` and stages a mode-0600 JSON/YAML fragment only. It makes **no network requests**, does not activate credentials, refuses conflicting existing stages and never prints key material. `--watch` waits in that process; no timer is installed. Release operators must later GET, privately back up and merge the **full** management value, never PUT this fragment as a replacement configuration.
+
+
 ## Install
 
 Release assets use one version consistently:
 
 ```text
-subscription-pool-v0.6.1.so
-subscription-pool_0.6.1_linux_amd64.zip
+subscription-pool-v0.7.0.so
+subscription-pool_0.7.0_linux_amd64.zip
 checksums.txt
 ```
 
@@ -91,14 +169,14 @@ checksums.txt
 Download the versioned shared library and `checksums.txt` from the same GitHub release, then verify before installation:
 
 ```sh
-version=0.6.1
+version=0.7.0
 sha256sum --check checksums.txt
 install -m 0755 "subscription-pool-v${version}.so" /path/to/cliproxy/plugins/linux/amd64/
 ```
 
 ### Install the plugin-store archive
 
-Verify `checksums.txt`, then supply `subscription-pool_0.6.1_linux_amd64.zip` to the CLIProxyAPI plugin-store flow. The archive contains exactly one root-level entry named `subscription-pool.so`.
+Verify `checksums.txt`, then supply `subscription-pool_0.7.0_linux_amd64.zip` to the CLIProxyAPI plugin-store flow. The archive contains exactly one root-level entry named `subscription-pool.so`.
 
 Use the host's supported reload procedure after changing the native plugin (or restart only when the tested host requires it). Confirm registration and all three capabilities before sending traffic. The release is not valid until CI passes the immutable host matrix: the deployed digest from [`deploy/deployed-host-image.json`](deploy/deployed-host-image.json), the latest `eceasy/cli-proxy-api` tag resolved to its linux/amd64 manifest at run time, and the historical baseline from [`.github/host-images.json`](.github/host-images.json).
 
@@ -143,7 +221,7 @@ Use the paid and infinite OpenAI-compatible entries shown [above](#syntheticnew)
 
 ## Configure the plugin
 
-Start from [`config.example.yaml`](config.example.yaml). Host fields (`enabled`, `priority`) and `cpa-config-path` belong under `plugins.configs.subscription-pool`. Provider settings belong under `providers.zai`, `providers.opencode-go` and `providers.synthetic`. Omit modules you do not use; do not copy Z.ai account overrides into a Synthetic-only installation.
+Start from [`config.example.yaml`](config.example.yaml). Host fields (`enabled`, `priority`) and `cpa-config-path` belong under `plugins.configs.subscription-pool`. Provider settings belong under `providers.<module-id>` (`zai`, `opencode-go`, `synthetic`, `cloudflare-workers-ai` and `nvidia-nim`). Omit modules you do not use; do not copy Z.ai account overrides into a Synthetic-only installation.
 
 ```yaml
 plugins:
@@ -199,7 +277,7 @@ Local state and non-secret settings are stored atomically under `<auth-dir>/subs
 The plugin adds a **Usage and Quota** entry to the Management Center's plugin menu (`/v0/resource/plugins/subscription-pool/status`). It uses the same design as the official Dashboard and Quota Management pages:
 
 - a headline verdict, requests handled with the success/failure split, and a traffic wave;
-- provider tabs (All, Z.ai, OpenCode Go, synthetic.new), time ranges (1 h, 6 h, 24 h, 7 d), search, and a model filter;
+- provider tabs (All, Z.ai, OpenCode Go, synthetic.new, Cloudflare Workers AI, NVIDIA NIM), time ranges (1 h, 6 h, 24 h, 7 d), search, and a model filter;
 - success rate, tokens, accounts and output-speed tiles;
 - a throughput chart (requests or tokens per bucket) with a data table;
 - every provider side by side, plus sortable per-account and per-model tables (requests, error rate, 429s, input/output/cached tokens, latency, time to first token, tokens per second, share);
@@ -222,7 +300,7 @@ curl --fail-with-body \
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/v0/management/plugins/subscription-pool/usage` | Usage page data: requests, tokens and errors per provider, account and model for `?range=` (`1h`, `6h`, `24h` or `7d`), quota cards, and the synthetic.new panel. |
-| `GET` | `/v0/management/plugins/subscription-pool/status` | Aggregated status and per-account quota for all three modules, under `providers`. |
+| `GET` | `/v0/management/plugins/subscription-pool/status` | Aggregated status and per-account quota for all configured provider modules, under `providers`. |
 | `GET` | `/v0/management/plugins/zai-coding-plan/status` | Z.ai per-account quota, reset times, source, freshness, off-peak state, health, and integrity warnings. |
 | `POST` | `/v0/management/plugins/zai-coding-plan/refresh` | Force a bounded Z.ai quota refresh. Body must be empty or `{}`. |
 | `POST` | `/v0/management/plugins/zai-coding-plan/unblock` | Clear transient Z.ai blocks without erasing retained quota or usage. Optional JSON: `{"account":"name-or-suffix"}`. |
@@ -230,7 +308,7 @@ curl --fail-with-body \
 
 The `zai-coding-plan` route prefix above is the Z.ai module's existing compatibility API, not a second plugin registration or a config entry to enable. OpenCode Go and synthetic.new status is read from the aggregate `providers` map; they do not expose separate refresh/write routes.
 
-The **Usage and Quota** resource entry at `/v0/resource/plugins/subscription-pool/status` displays the redacted three-provider dashboard described above. Resource routes are intentionally unauthenticated: never put a management credential in the iframe or resource URL. Detailed diagnostics and write operations stay on authenticated management routes.
+The **Usage and Quota** resource entry at `/v0/resource/plugins/subscription-pool/status` displays the redacted multi-provider dashboard described above. Resource routes are intentionally unauthenticated: never put a management credential in the iframe or resource URL. Detailed diagnostics and write operations stay on authenticated management routes.
 
 Status accounts include `five_hour_utilization`, `weekly_utilization`, `five_hour_resets_at`, `weekly_resets_at`, `quota_source`, `quota_observed_at`, `quota_age_seconds`, `quota_stale`, `offpeak`, `health`, and bounded integrity-warning fields. They also expose the existing stable account pseudonym as `identity` and an explicit transient-429 `cooldown` object. These are restricted management metadata, not public telemetry or CPA auth IDs. See the [producer/consumer status contract](docs/STATUS-CONTRACT.md) for redaction, provenance, freshness, expiry, and refusal semantics. No raw key or raw key suffix is exposed. OpenCode Go window resets are not this cooldown contract.
 
@@ -245,8 +323,8 @@ make test
 make lint
 make test-release
 make validate-source
-make package VERSION=0.6.1
-make validate-release VERSION=0.6.1 TAG=v0.6.1
+make package VERSION=0.7.0
+make validate-release VERSION=0.7.0 TAG=v0.7.0
 (cd dist && sha256sum --check checksums.txt)
 ```
 

@@ -1,4 +1,5 @@
 import hashlib
+import json
 import pathlib
 import re
 import unittest
@@ -22,8 +23,10 @@ class RunbookSecurityTest(unittest.TestCase):
         config = CONFIG.read_text()
         readme = README.read_text()
         self.assertNotIn("/main/registry.json", config)
-        self.assertIn("v0.6.1/registry.json", config)
-        self.assertIn('release_dir=/path/to/downloaded-v0.6.1-release-assets', readme)
+        version = json.loads(REGISTRY.read_text())["plugins"][0]["version"]
+        self.assertRegex(version, r"^\d+\.\d+\.\d+$")
+        self.assertIn(f"v{version}/registry.json", config)
+        self.assertIn(f'release_dir=/path/to/downloaded-v{version}-release-assets', readme)
         self.assertIn('"$release_dir/registry.json"', readme)
         self.assertIn('grep -F "  registry.json" "$release_dir/checksums.txt"', readme)
         self.assertIn("sha256sum --check --status", readme)

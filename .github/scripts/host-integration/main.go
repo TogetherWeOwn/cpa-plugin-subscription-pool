@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/TogetherWeOwn/cpa-plugin-subscription-pool/internal/abiclient"
@@ -189,6 +190,22 @@ openai-compatibility:
     models:
       - name: smoke-upstream-openai
         alias: smoke-model
+  - name: cloudflare-workers-ai
+    base-url: https://api.cloudflare.com/client/v4/accounts/0123456789abcdef0123456789abcdef/ai/v1
+    api-key-entries:
+      - api-key: test-only-cloudflare-integration-key
+    models:
+      - name: "@cf/qwen/qwen3-30b-a3b-fp8"
+        alias: cloudflare-workers-ai/qwen3-30b-a3b-fp8
+        max-context-length: 32768
+        thinking: {}
+  - name: nvidia-nim
+    base-url: https://integrate.api.nvidia.com/v1
+    api-key-entries:
+      - api-key: test-only-nvidia-integration-key
+    models:
+      - name: z-ai/glm-5.3-flash
+        alias: nvidia-nim/glm-5.3-flash
 plugins:
   enabled: true
   dir: %q
@@ -198,6 +215,14 @@ plugins:
       priority: 1000
       cpa-config-path: %q
       providers:
+        nvidia-nim:
+          stayWithinFree: true
+          free-tier-confirmed: true
+          requests-per-minute: 10
+          free-request-limit: 2
+          free-models: [z-ai/glm-5.3-flash]
+        cloudflare-workers-ai:
+          stayWithinIncluded: true
         zai:
           quota-refresh-interval: 1m
           authoritative-max-age: 3m
@@ -216,19 +241,23 @@ plugins:
 		return err
 	}
 	defer logFile.Close()
-	command := exec.Command(hostBinary, "-config", configPath)
-	command.Dir = root
-	command.Stdout = logFile
-	command.Stderr = logFile
-	command.Env = cleanProxyEnvironment(append(os.Environ(), "SSL_CERT_FILE="+caPath))
-	if err := command.Start(); err != nil {
-		return fmt.Errorf("start tested host binary: %w", err)
-	}
-	defer stopProcess(command)
-
+	var command *exec.Cmd
 	client := &http.Client{Timeout: 5 * time.Second}
 	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
-	if err := waitForRegistered(client, baseURL); err != nil {
+	restart := func() error {
+		stopProcess(command)
+		command = exec.Command(hostBinary, "-config", configPath)
+		command.Dir = root
+		command.Stdout = logFile
+		command.Stderr = logFile
+		command.Env = cleanProxyEnvironment(append(os.Environ(), "SSL_CERT_FILE="+caPath))
+		if err := command.Start(); err != nil {
+			return fmt.Errorf("start tested host binary: %w", err)
+		}
+		return waitForRegistered(client, baseURL)
+	}
+	defer func() { stopProcess(command) }()
+	if err := restart(); err != nil {
 		return withHostLog(root, err)
 	}
 	if err := verifyStatusAuthentication(client, baseURL); err != nil {
@@ -238,6 +267,12 @@ plugins:
 		return withHostLog(root, err)
 	}
 	if err := inferenceRoundTrip(client, baseURL, "/v1/chat/completions", "zai-openai/smoke-model", "openai smoke ok", false); err != nil {
+		return withHostLog(root, err)
+	}
+	if err := verifyNvidiaHTTP(client, baseURL, configPath, config, restart); err != nil {
+		return withHostLog(root, err)
+	}
+	if err := verifyCloudflareHTTP(client, baseURL, root, configPath, config, restart); err != nil {
 		return withHostLog(root, err)
 	}
 	if err := stub.assertRequests(); err != nil {
@@ -382,6 +417,9 @@ func requestJSON(client *http.Client, method, url, key string, body io.Reader) (
 	if key != "" {
 		request.Header.Set("Authorization", "Bearer "+key)
 	}
+	if body != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
 	response, err := client.Do(request)
 	if err != nil {
 		return statusResponse{}, err
@@ -424,8 +462,20 @@ func stopProcess(command *exec.Cmd) {
 	if command == nil || command.Process == nil {
 		return
 	}
-	_ = command.Process.Kill()
-	_ = command.Wait()
+	// Let the host drain callbacks and save its usage ledger on a normal
+	// fixture restart. Billing reservations are already durable before dispatch.
+	_ = command.Process.Signal(syscall.SIGTERM)
+	done := make(chan struct{})
+	go func() {
+		_ = command.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		_ = command.Process.Kill()
+		<-done
+	}
 }
 
 func rejectSchedulerErrors(root string) error {
@@ -434,9 +484,14 @@ func rejectSchedulerErrors(root string) error {
 		return err
 	}
 	log := string(raw)
-	for _, marker := range []string{"zai_unmanaged_candidate", "scheduler rejected auth pick"} {
-		if strings.Contains(log, marker) {
-			return fmt.Errorf("host log contains scheduler failure %q\nhost log:\n%s", marker, log)
+	for _, line := range strings.Split(log, "\n") {
+		if strings.Contains(line, "cloudflare_no_capacity: included_exhausted") || strings.Contains(line, "cloudflare_no_capacity: recent_payg_usage") || strings.Contains(line, "nvidia_nim_no_capacity: free_or_rate_boundary") {
+			continue
+		}
+		for _, marker := range []string{"zai_unmanaged_candidate", "scheduler rejected auth pick"} {
+			if strings.Contains(line, marker) {
+				return fmt.Errorf("host log contains unexpected scheduler failure %q\nhost log:\n%s", marker, log)
+			}
 		}
 	}
 	return nil
