@@ -27,19 +27,20 @@ func (m *Module) HandleUsage(_ context.Context, r pluginapi.UsageRecord) error {
 	}
 	now := m.now().UTC()
 	delay := retryAfter(r.ResponseHeaders, now)
-	// Only 402 is an explicit payment boundary and latches until an operator
-	// clears it. Ordinary RPM 429 bodies also say "quota" or "daily", so a
-	// worded 429 gets a durable, bounded backoff instead of a permanent latch:
-	// a one-minute refill is still never treated as a free-credit grant. The
-	// body is inspected only for classification and never saved or logged.
+	// A 402, or a 429 that names credits or a trial, is a payment boundary and
+	// latches until an operator re-verifies the entitlement: an automatic
+	// resume could spend credit added later for other users of the account.
+	// Ordinary RPM 429 bodies also say "quota" or "daily", so that wording
+	// alone gets a durable, bounded backoff instead of the latch. The body is
+	// inspected only for classification and never saved or logged.
 	body := r.Failure.Body
 	if len(body) > 16384 {
 		body = body[:16384]
 	}
 	body = strings.ToLower(body)
-	if code == 402 {
+	if code == 402 || (code == 429 && (strings.Contains(body, "credit") || strings.Contains(body, "trial"))) {
 		m.state.FreeExhausted = true
-	} else if code == 429 && delay < quotaBackoff && (strings.Contains(body, "credit") || strings.Contains(body, "quota") || strings.Contains(body, "trial") || strings.Contains(body, "daily") || strings.Contains(body, "monthly")) {
+	} else if code == 429 && delay < quotaBackoff && (strings.Contains(body, "quota") || strings.Contains(body, "daily") || strings.Contains(body, "monthly")) {
 		delay = quotaBackoff
 	}
 	if until := now.Add(delay); until.After(m.state.CooldownUntil) {

@@ -58,8 +58,27 @@ func TestRate429RetryAfterAndCreditFailureAreDifferent(t *testing.T) {
 	m.now = func() time.Time { return start.Add(24 * time.Hour) }
 	assertPick(t, m, r, false)
 }
+func TestCreditOrTrialWorded429LatchesUntilOperatorClears(t *testing.T) {
+	for _, body := range []string{`{"error":"Insufficient credits"}`, `{"detail":"Your TRIAL has ended"}`, `{"error":"daily quota of free credits used"}`} {
+		h := hostConfig(t)
+		m := setup(t, h, freeConfig)
+		r := req(m)
+		failure := pluginapi.UsageRecord{AuthID: r.Candidates[0].ID, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: 429, Body: body}, ResponseHeaders: http.Header{"Retry-After": {"5"}}}
+		if err := m.HandleUsage(context.Background(), failure); err != nil {
+			t.Fatal(err)
+		}
+		_ = m.Close(context.Background())
+		next := setup(t, h, freeConfig)
+		next.now = func() time.Time { return start.Add(30 * 24 * time.Hour) }
+		if got := next.reason(next.lanes[r.Candidates[0].ID], r.Model, next.now()); got != "free_exhausted" {
+			t.Fatalf("%s: reason = %q, want sticky free_exhausted", body, got)
+		}
+		assertPick(t, next, req(next), false)
+	}
+}
+
 func TestQuotaWorded429BacksOffDurablyWithoutPermanentLatch(t *testing.T) {
-	for _, body := range []string{`{"error":"Insufficient credits"}`, `{"error":"Rate limit exceeded: 40 requests per minute quota"}`} {
+	for _, body := range []string{`{"error":"Rate limit exceeded: 40 requests per minute quota"}`, `{"error":"daily limit reached"}`, `monthly quota`} {
 		h := hostConfig(t)
 		m := setup(t, h, freeConfig)
 		r := req(m)
