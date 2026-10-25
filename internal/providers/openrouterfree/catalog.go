@@ -99,7 +99,16 @@ func fetchFreeModels(ctx context.Context, client providermodule.HTTPDoer) ([]str
 	if status != http.StatusOK {
 		return nil, fmt.Errorf("catalog_http_%d", status)
 	}
-	return parseCatalog(body)
+	models, err := parseCatalog(body)
+	if err != nil {
+		return nil, err
+	}
+	// A catalog that parses but lists no free model is far likelier a schema
+	// change than OpenRouter retiring every free model; keep the previous list.
+	if len(models) == 0 {
+		return nil, fmt.Errorf("catalog_no_free_models")
+	}
+	return models, nil
 }
 
 func parseCatalog(body []byte) ([]string, error) {

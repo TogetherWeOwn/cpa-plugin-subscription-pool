@@ -280,8 +280,9 @@ func (m *Module) Pick(_ context.Context, r pluginapi.SchedulerPickRequest) (plug
 }
 
 // reason is "" when l may serve model now. The free-model checks hold even
-// with stayWithinFree off: nothing but a verified :free id ever goes through
-// this provider. stayWithinFree only governs the local rate and daily limits.
+// with stayWithinFree off, and so is catalog freshness: nothing but a verified
+// :free id ever goes through this provider. stayWithinFree only governs the
+// local rate and daily limits.
 func (m *Module) reason(l lane, model string, now time.Time) string {
 	if !l.bound {
 		return "placeholder_key"
@@ -309,11 +310,13 @@ func (m *Module) reason(l lane, model string, now time.Time) string {
 			}
 		}
 	}
-	if !m.cfg.StayWithinFree {
-		return ""
-	}
+	// A stale list may name a model OpenRouter has since repriced, so this
+	// holds even with stayWithinFree off.
 	if now.Sub(m.state.CatalogAt) > m.cfg.CatalogMaxAge {
 		return "stale_catalog"
+	}
+	if !m.cfg.StayWithinFree {
+		return ""
 	}
 	if len(m.state.Recent) >= m.cfg.RequestsPerMinute {
 		return "rate_limited"

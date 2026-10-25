@@ -591,3 +591,34 @@ func TestConfigValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestCatalogWithNoFreeModelsKeepsThePreviousListAndNeverWipesTheHost(t *testing.T) {
+	keyFile := filepath.Join(t.TempDir(), "mgmt.key")
+	if err := os.WriteFile(keyFile, []byte("test-only-management-key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f := newFake(idA)
+	m := setup(t, hostWith(t, f, entry(idA)), `{"management-key-file":"`+keyFile+`"}`)
+	syncNow(t, m)
+	f.mu.Lock()
+	f.catalog = catalogJSON() // parses, but nothing survives the free filter
+	f.mu.Unlock()
+	m.now = func() time.Time { return start.Add(6 * time.Hour) }
+	syncNow(t, m)
+	if s := status(t, m); s.LastSyncError != "catalog_no_free_models" || s.ModelCount != 1 || s.HostSync != reconcileCatalogFailed {
+		t.Fatalf("status: %+v", s)
+	}
+	if len(f.patches()) != 0 {
+		t.Fatal("host list was patched from an empty free list")
+	}
+	assertPick(t, m, req(m, aliasPrefix+idA), true)
+}
+
+func TestStaleCatalogRefusesEvenWithTheLocalLimitsOff(t *testing.T) {
+	f := newFake(idA)
+	m := setup(t, hostWith(t, f, entry(idA)), `{"stayWithinFree":false}`)
+	syncNow(t, m)
+	assertPick(t, m, req(m, aliasPrefix+idA), true)
+	m.now = func() time.Time { return start.Add(25 * time.Hour) }
+	assertPick(t, m, req(m, aliasPrefix+idA), false)
+}
