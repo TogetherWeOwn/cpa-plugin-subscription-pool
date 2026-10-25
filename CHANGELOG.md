@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- `openrouter-free` provider module. Every 6 hours (and on start) it reads OpenRouter's public model catalog, keeps the ids ending in `:free` whose prices are all zero and that output text, and reconciles the host's `openrouter-free` OpenAI-compatible entry to exactly that list (aliases `openrouter-free/<id>`). Each add and remove is logged and kept in an audit trail on the authenticated status route, which also exposes the current list, the daily limit and the sync outcome.
+- Free-only admission: a request is admitted only for a model on the last verified free list, on the exact `https://openrouter.ai/api/v1` endpoint, within 20 requests/minute and the key's daily free-model limit (50, or 1000 with purchased credits, read from `GET /api/v1/key`; the lowest is assumed until known). Admissions are persisted before dispatch and the daily counter resets at 00:00 UTC. A removed model stops being admitted at the next sync even if the host list has not caught up, and a catalog older than `catalog-max-age` (24h) fails closed.
+- The host list is updated only through the host's management API (`PATCH /v0/management/openai-compatibility`, `models` only) using a key read from `management-key-file` on a loopback `management-url`; the plugin never reads or rewrites provider credentials. Without the key file the module still enforces the guard and reports `host_sync: no_management_key`.
+- Usage and Quota card for the provider (daily and rolling-RPM admissions, free-model count). The example host entry ships disabled with an empty model list.
+
 ## [0.7.0] - 2026-10-24
 
 ### Added

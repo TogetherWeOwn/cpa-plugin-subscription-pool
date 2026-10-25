@@ -18,6 +18,15 @@ openai-compatibility:
     models:
       - name: z-ai/glm-5.3-flash
         alias: nvidia-nim/glm-5.3-flash
+  # OpenRouter free models: the plugin keeps `models` equal to OpenRouter's current
+  # free (:free, zero-price) list; leave it empty here. Enable by removing `disabled`
+  # once the key and management-key-file below are in place.
+  - name: openrouter-free
+    disabled: true
+    base-url: https://openrouter.ai/api/v1
+    api-key-entries:
+      - api-key: ${OPENROUTER_API_KEY}
+    models: []
   - name: zai-coding-plan
     base-url: https://api.z.ai/api/coding/paas/v4
     api-key-entries:
@@ -115,6 +124,17 @@ plugins:
           free-models: []         # verified exact upstream IDs, not aliases
           free-request-limit: 0  # optional local lifetime ceiling, never a credit grant
           # trial-expires-at: "2026-11-01T00:00:00Z"  # only the account's actual expiry
+        openrouter-free:
+          stayWithinFree: true           # false drops only the local RPM/daily limits; never the :free-only rule
+          requests-per-minute: 20        # OpenRouter's free-model limit; may only be lowered
+          # daily-request-limit: 0       # optional LOWER cap; the limit itself comes from GET /api/v1/key (50 or 1000)
+          sync-interval: 6h              # catalog poll; at least 10m
+          catalog-max-age: 24h           # refuse requests if no catalog sync succeeded for this long
+          # Models are reconciled through the host's management API (PATCH only `models`).
+          # management-key-file holds the host management key (mode 0600); without it the
+          # module still enforces free-only and limits but cannot update the host list.
+          management-key-file: /app/auths/openrouter-free.management-key
+          management-url: http://127.0.0.1:8317
         zai:
           quota-refresh-interval: 2m
           authoritative-max-age: 5m
