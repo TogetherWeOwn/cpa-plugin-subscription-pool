@@ -54,20 +54,21 @@ type syncInfo struct {
 }
 
 type Module struct {
-	mu       sync.Mutex
-	syncMu   sync.Mutex
-	cfg      moduleConfig
-	view     hostView
-	state    state
-	free     map[string]bool // ModelKey-folded state.Models
-	sync     syncInfo
-	store    *securestore.Store
-	client   providermodule.HTTPDoer
-	stateErr bool
-	closed   bool
-	cursor   uint64
-	now      func() time.Time
-	logf     func(format string, args ...any)
+	mu         sync.Mutex
+	syncMu     sync.Mutex
+	cfg        moduleConfig
+	view       hostView
+	generation uint64 // invalidates sync results across successful reconfigures
+	state      state
+	free       map[string]bool // ModelKey-folded state.Models
+	sync       syncInfo
+	store      *securestore.Store
+	client     providermodule.HTTPDoer
+	stateErr   bool
+	closed     bool
+	cursor     uint64
+	now        func() time.Time
+	logf       func(format string, args ...any)
 
 	started bool
 	noLoop  bool
@@ -129,10 +130,23 @@ func (m *Module) Reconfigure(_ context.Context, host providermodule.HostConfig, 
 			return fmt.Errorf("openrouter_free_state_unavailable: invalid allowance state")
 		}
 	}
+	credentialsChanged := view.apiKey != m.view.apiKey || len(view.lanes) != len(m.view.lanes)
+	for id := range view.lanes {
+		if _, ok := m.view.lanes[id]; !ok {
+			credentialsChanged = true
+		}
+	}
+	if credentialsChanged {
+		// Entitlement is credential-specific, unlike the shared conservative
+		// usage debit. A restart also has no verified in-memory binding, so
+		// recheck the key before trusting an elevated persisted ceiling.
+		st.DailyLimit, st.LimitAt = 0, time.Time{}
+	}
 	if m.store != nil {
 		_ = m.store.Close()
 	}
 	m.cfg, m.view, m.store, m.stateErr = cfg, view, store, false
+	m.generation++
 	m.setState(st)
 	if host.Clock != nil {
 		m.now = host.Clock.Now
@@ -146,7 +160,7 @@ func (m *Module) Reconfigure(_ context.Context, host providermodule.HostConfig, 
 			ctx, cancel := context.WithCancel(context.Background())
 			m.cancel, m.done, m.started = cancel, make(chan struct{}), true
 			go m.syncLoop(ctx)
-		} else if m.now().Sub(m.sync.LastAttempt) >= kickDebounce {
+		} else if credentialsChanged || m.now().Sub(m.sync.LastAttempt) >= kickDebounce {
 			select {
 			case m.kick <- struct{}{}:
 			default:

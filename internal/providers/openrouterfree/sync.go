@@ -60,7 +60,7 @@ func (m *Module) syncOnce(ctx context.Context) {
 		m.mu.Unlock()
 		return
 	}
-	client, apiKey := m.client, m.view.apiKey
+	client, apiKey, generation := m.client, m.view.apiKey, m.generation
 	m.mu.Unlock()
 
 	models, catalogErr := fetchFreeModels(ctx, client)
@@ -71,7 +71,7 @@ func (m *Module) syncOnce(ctx context.Context) {
 	}
 
 	m.mu.Lock()
-	if m.closed {
+	if m.closed || generation != m.generation {
 		m.mu.Unlock()
 		return
 	}
