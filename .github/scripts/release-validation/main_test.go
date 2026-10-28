@@ -288,6 +288,16 @@ func TestValidateReleaseWorkflowBoundaryAcceptsCanonicalWorkflow(t *testing.T) {
 	}
 }
 
+func TestValidateReleaseWorkflowBoundaryRejectsPreviousDownloadAction(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	workflow := strings.Replace(validReleaseWorkflow(t), "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333", "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c", 1)
+	writeReleaseWorkflows(t, root, workflow)
+	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "canonical action") {
+		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want previous download action rejection", err)
+	}
+}
+
 func TestValidateReleaseWorkflowBoundaryRejectsBuildCommandMutation(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
