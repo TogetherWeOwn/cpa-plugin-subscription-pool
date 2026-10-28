@@ -23,6 +23,13 @@ func TestReplacementCredentialCannotInheritElevatedAllowance(t *testing.T) {
 	if s := status(t, m); s.DailyLimit != 50 || s.DailyLimitSource != "assumed_lowest" || s.UsedToday != 1 {
 		t.Fatalf("replacement inherited entitlement or lost usage: %+v", s)
 	}
+	// No admission or completed sync has persisted the invalidation yet.
+	if err := m.Reconfigure(context.Background(), host, json.RawMessage(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	if s := status(t, m); s.DailyLimit != 50 || s.DailyLimitSource != "assumed_lowest" {
+		t.Fatalf("repeated reconfigure restored obsolete entitlement: %+v", s)
+	}
 	for i := 1; i < 50; i++ {
 		m.now = func() time.Time { return start.Add(time.Duration(i) * time.Minute) }
 		assertPick(t, m, req(m, aliasPrefix+idA), true)
@@ -47,6 +54,25 @@ func TestRestartMustReverifyElevatedAllowance(t *testing.T) {
 	syncNow(t, again)
 	if s := status(t, again); s.DailyLimit != 1000 || s.UsedToday != 1 {
 		t.Fatalf("fresh quota lookup did not restore entitlement: %+v", s)
+	}
+}
+
+func TestReenableMustReverifyPersistedEntitlement(t *testing.T) {
+	f := newFake(idA)
+	host := hostWith(t, f, entry(idA))
+	m := setup(t, host, `{}`)
+	syncNow(t, m)
+	assertPick(t, m, req(m, aliasPrefix+idA), true)
+	if err := m.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	host.OpenAICompatibility[0].APIKeyEntries[0].APIKey = "test-only-replacement-key"
+	again := setup(t, host, `{"enabled":false}`)
+	if err := again.Reconfigure(context.Background(), host, json.RawMessage(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	if s := status(t, again); s.DailyLimit != 50 || s.UsedToday != 1 {
+		t.Fatalf("reenable restored obsolete persisted entitlement: %+v", s)
 	}
 }
 

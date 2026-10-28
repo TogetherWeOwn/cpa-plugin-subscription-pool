@@ -136,11 +136,14 @@ func (m *Module) Reconfigure(_ context.Context, host providermodule.HostConfig, 
 			credentialsChanged = true
 		}
 	}
-	if credentialsChanged {
+	if credentialsChanged || !m.active() {
 		// Entitlement is credential-specific, unlike the shared conservative
-		// usage debit. A restart also has no verified in-memory binding, so
-		// recheck the key before trusting an elevated persisted ceiling.
+		// usage debit. A restart or reenable has no verified active binding.
 		st.DailyLimit, st.LimitAt = 0, time.Time{}
+	} else {
+		// Only this process's live binding may carry entitlement forward.
+		// Reloading it from disk could undo an unpersisted invalidation.
+		st.DailyLimit, st.LimitAt = m.state.DailyLimit, m.state.LimitAt
 	}
 	if m.store != nil {
 		_ = m.store.Close()
