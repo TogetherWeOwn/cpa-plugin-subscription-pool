@@ -248,7 +248,7 @@ func validatePublishJob(raw []byte, node *yaml.Node) error {
 		return err
 	}
 	with, err := yamlStringMap(download["with"], "release artifact download inputs")
-	if err != nil || yamlScalarValue(download["uses"]) != "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c" || len(with) != 2 || with["name"] != "release-artifacts" || with["path"] != "release-artifacts" {
+	if err != nil || yamlScalarValue(download["uses"]) != "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333" || len(with) != 2 || with["name"] != "release-artifacts" || with["path"] != "release-artifacts" {
 		return errors.New("release artifact download step must use the canonical action and inputs")
 	}
 	publication, err := yamlMapping(steps.Content[1], "release publication step")
