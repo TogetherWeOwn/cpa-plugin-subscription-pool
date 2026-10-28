@@ -71,7 +71,7 @@ func validateReleaseWorkflowShape(raw []byte) error {
 		1:  "actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e",
 		4:  "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
 		7:  "golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a",
-		13: "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+		13: "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9",
 	}
 	commands := map[int]canonicalRunStep{
 		2: {name: "Validate trusted release controls", workingDirectory: "release-controls", command: `set -euo pipefail
