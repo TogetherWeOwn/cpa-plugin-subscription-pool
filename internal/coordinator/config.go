@@ -11,7 +11,7 @@ import (
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	"gopkg.in/yaml.v3"
 
-	"github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/internal/providermodule"
+	"github.com/TogetherWeOwn/cpa-plugin-subscription-pool/internal/providermodule"
 )
 
 const defaultCPAConfigPath = "config.yaml"
@@ -156,12 +156,17 @@ func loadHostCPAConfig(path string) (hostCPAConfig, error) {
 				ProxyURL: entry.ProxyURL,
 			})
 		}
+		models := make([]providermodule.OpenAICompatibilityModel, 0, len(compat.Models))
+		for _, model := range compat.Models {
+			models = append(models, providermodule.OpenAICompatibilityModel{Name: model.Name, Alias: model.Alias})
+		}
 		compats = append(compats, providermodule.OpenAICompatibility{
 			Name:          compat.Name,
 			BaseURL:       compat.BaseURL,
 			Disabled:      compat.Disabled,
 			Headers:       compat.Headers,
 			APIKeyEntries: entries,
+			Models:        models,
 		})
 	}
 	return hostCPAConfig{

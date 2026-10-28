@@ -1,5 +1,5 @@
 # Merge these non-secret fields into the deployed CLIProxyAPI config.
-# The operator substitutes ZAI_CODING_PLAN_KEY from the host secret channel;
+# The operator substitutes ZAI_CODING_PLAN_KEY and SYNTHETIC_API_KEY from the host secret channel;
 # the rendered file must remain mode 0600 and must never enter git or logs.
 claude-api-key:
   - api-key: ${ZAI_CODING_PLAN_KEY}
@@ -7,22 +7,76 @@ claude-api-key:
     prefix: zai
 
 openai-compatibility:
+  # NVIDIA trial access/output is internal-evaluation-only, not production.
+  # Keep the host lane disabled until permitted use, key, exact model access
+  # and account-specific RPM are verified; supplying a key never activates it.
+  - name: nvidia-nim
+    disabled: true
+    base-url: https://integrate.api.nvidia.com/v1
+    api-key-entries:
+      - api-key: ${NVIDIA_NIM_API_KEY}
+    models:
+      - name: z-ai/glm-5.3-flash
+        alias: nvidia-nim/glm-5.3-flash
   - name: zai-coding-plan
     base-url: https://api.z.ai/api/coding/paas/v4
     api-key-entries:
       - api-key: ${ZAI_CODING_PLAN_KEY}
+  - name: synthetic-infinite
+    priority: -1
+    base-url: https://api.synthetic.new/openai/v1
+    api-key-entries:
+      - api-key: ${SYNTHETIC_API_KEY}
+    models:
+      - name: "infinite:small:vision"
+        alias: synthetic-infinite/deepseek-v4.1-flash
+      - name: "infinite:small:vision"
+        alias: synthetic/deepseek-v4.1-flash
+  - name: synthetic
+    base-url: https://api.synthetic.new/openai/v1
+    api-key-entries:
+      - api-key: ${SYNTHETIC_API_KEY}
+    models:
+      - name: "hf:deepseek-ai/DeepSeek-V4.1-Flash"
+        alias: synthetic/deepseek-v4.1-flash
+
+  # Disabled until a scoped token and account-wide GraphQL canary are verified.
+  # Render both placeholders before applying; never send placeholders to a host.
+  # The complete model catalog is in config.example.yaml.
+  - name: cloudflare-workers-ai
+    disabled: true
+    base-url: https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/ai/v1
+    api-key-entries:
+      - api-key: ${CLOUDFLARE_WORKERS_AI_TOKEN}
+    models:
+      - name: "@cf/qwen/qwen3-30b-a3b-fp8"
+        alias: cloudflare-workers-ai/qwen3-30b-a3b-fp8
+        max-context-length: 32768
+        input-modalities: [text]
+        thinking: {}
+      - name: "@cf/zai-org/glm-4.7-flash"
+        alias: cloudflare-workers-ai/glm-4.7-flash
+        max-context-length: 131072
+        input-modalities: [text]
+        thinking: {}
 
 plugins:
   enabled: true
   dir: /app/plugins
   store-sources:
-    - https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/download/v0.4.5/registry.json
+    - https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/releases/download/v0.7.0/registry.json
   configs:
     subscription-pool:
       enabled: true
       priority: 1000
       cpa-config-path: /app/config.yaml
       providers:
+        nvidia-nim:
+          stayWithinFree: true
+          free-tier-confirmed: false
+          requests-per-minute: 0
+          free-models: []
+          free-request-limit: 0
         zai:
           quota-refresh-interval: 2m
           authoritative-max-age: 5m
@@ -36,3 +90,15 @@ plugins:
               name: zai-pro-1
               plan: pro
               disabled: false
+        synthetic:
+          threshold-percent: 95
+          quota-refresh-interval: 2m
+          max-concurrent: 0
+          infinite-max-concurrent: 0
+        cloudflare-workers-ai:
+          enabled: true
+          stayWithinIncluded: true
+          safety-margin-neurons: 500
+          usage-refresh-interval: 30s
+          usage-max-age: 2m
+          providers: [cloudflare-workers-ai]

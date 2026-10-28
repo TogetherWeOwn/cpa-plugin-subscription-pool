@@ -12,7 +12,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 
-	"github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/internal/providermodule"
+	"github.com/TogetherWeOwn/cpa-plugin-subscription-pool/internal/providermodule"
 )
 
 func configuredModule(t *testing.T, threshold int) *Module {
@@ -694,5 +694,29 @@ func monthlyLimitRecord(authID string, now time.Time, seconds int) pluginapi.Usa
 		Failed:          true,
 		Failure:         pluginapi.UsageFailure{StatusCode: http.StatusTooManyRequests, Body: `[opencode-go/qwen] [429]: Monthly usage limit reached. Resets in 1hr. To continue using this model now, enable us (reset after 1h)`},
 		ResponseHeaders: http.Header{"Retry-After": []string{strconv.Itoa(seconds)}},
+	}
+}
+
+func TestDisabledModuleDoesNotClaimOpenCodeGoTraffic(t *testing.T) {
+	m := NewModule()
+	if err := m.Reconfigure(context.Background(), providermodule.HostConfig{}, json.RawMessage(`{"enabled":false,"accounts":[{"name":"go-1","auth-ids":["openai-compatibility:opencode-go:a"]}]}`)); err != nil {
+		t.Fatal(err)
+	}
+	candidate := pluginapi.SchedulerAuthCandidate{ID: "openai-compatibility:opencode-go:a", Provider: "openai-compatible-opencode-go", Attributes: map[string]string{"compat_name": "opencode-go"}}
+	if m.Recognize(candidate) {
+		t.Fatal("disabled OpenCode Go module recognized its own provider's candidate; Pick would then fail every request as unmanaged")
+	}
+}
+
+func TestUsageAccountNamesTheOwningAccount(t *testing.T) {
+	module := configuredModule(t, 97)
+	if got := module.UsageAccount(pluginapi.UsageRecord{AuthID: "go-b-1"}); got != "go-b" {
+		t.Fatalf("UsageAccount(go-b-1) = %q, want go-b", got)
+	}
+	if got := module.UsageAccount(pluginapi.UsageRecord{AuthID: "other"}); got != "" {
+		t.Fatalf("UsageAccount(other) = %q, want empty", got)
+	}
+	if got := NewModule().UsageAccount(pluginapi.UsageRecord{AuthID: "go-b-1"}); got != "" {
+		t.Fatalf("UsageAccount on an unconfigured module = %q, want empty", got)
 	}
 }

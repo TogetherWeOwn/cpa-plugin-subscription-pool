@@ -10,7 +10,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 
-	"github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/internal/providers/zai"
+	"github.com/TogetherWeOwn/cpa-plugin-subscription-pool/internal/providers/zai"
 )
 
 const zaiIntegrationFixtureKey = "test-only-coordinator-zai-key"

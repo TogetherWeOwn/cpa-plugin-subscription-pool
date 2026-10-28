@@ -58,6 +58,14 @@ type OpenAICompatibility struct {
 	Disabled      bool
 	Headers       map[string]string
 	APIKeyEntries []OpenAICompatibilityAPIKey
+	Models        []OpenAICompatibilityModel
+}
+
+// OpenAICompatibilityModel binds the host alias to the actual upstream model.
+// Cost guards must price Name, never trust the spelling of Alias.
+type OpenAICompatibilityModel struct {
+	Name  string
+	Alias string
 }
 
 // OpenAICompatibilityAPIKey mirrors one openai-compatibility api-key-entries item.
@@ -103,6 +111,24 @@ type ManagementCapable interface {
 	// (by matching req against a route this module previously declared)
 	// belongs to this module.
 	HandleManagement(ctx context.Context, req pluginapi.ManagementRequest) pluginapi.ManagementResponse
+}
+
+// UsageRecognizer is optionally implemented by a Module that can claim a
+// usage record whose auth ID is absent from the coordinator's dispatch
+// registry, for example a credential added or re-keyed after the last
+// Reconfigure, or a host whose auth-ID derivation differs from the module's
+// own. The coordinator only consults it when no module owns record.AuthID,
+// and dispatches only when exactly one module claims the record.
+type UsageRecognizer interface {
+	RecognizeUsage(record pluginapi.UsageRecord) bool
+}
+
+// UsageAttributor is optionally implemented by a Module that can name the
+// account a usage record it accepted belongs to. The coordinator calls it
+// after HandleUsage, for its usage ledger only. The returned name must be a
+// display name (never a key, key fragment or auth ID); "" means unknown.
+type UsageAttributor interface {
+	UsageAccount(record pluginapi.UsageRecord) string
 }
 
 // WireError is the coded error shape carried across the CGo ABI boundary.

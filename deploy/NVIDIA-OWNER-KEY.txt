@@ -1,0 +1,49 @@
+NVIDIA hosted-NIM owner key setup (staging only; not released or deployed)
+
+1. Open https://build.nvidia.com and sign in/join the NVIDIA Developer Program.
+   Select a model, select an Input option, click Get API Key, then Generate Key.
+   Copy the generated API key once. Do not create an NGC container-pull-only key.
+   Official click path: https://docs.nvidia.com/nim/large-language-models/1.11.0/getting-started.html#generate-an-api-key
+
+2. In a private editor, replace only the placeholder in
+   ~/secure-drop/nvidia.env with KEY=<your API key>, as one unquoted line.
+   Do not paste the key into chat, tickets, a command argument or shell history.
+   The prepared drop is mode 0600 in a mode-0700 directory. Existing keys are
+   never overwritten by the preparation step. No key rotation is requested.
+
+3. In the signed-in API Catalog, inspect the account menu at the top right for
+   the actual rate limit/entitlement. Record the free model IDs, any expiration,
+   credits and whether overage billing is possible, WITHOUT the key. Do not
+   assume every account receives 40 RPM, 1,000 credits or a monthly reset.
+   The operator must verify these before enabling free-tier-confirmed.
+
+4. The release operator can run (no network or live-config changes):
+   python3 deploy/nvidia-key-watch.py
+   Or append --watch to wait in that process for the file to be filled.
+   It stages ~/secure-drop/nvidia.provider.json as a private JSON/YAML fragment
+   and prints only a closed-vocabulary receipt. No watcher/timer is armed now.
+   The source key remains private. A conflicting staged key is never replaced.
+
+5. Wait for the provider release/compatibility gates and entitlement check.
+   Do NOT add this key to the live CLIProxy UI now: an older plugin would not
+   guard it. A later operator installs the released module, GETs and backs up
+   the complete management value (0600), merges the provider, and PUTs the FULL
+   value, preserving all unrelated credentials. The staged fragment is NOT a
+   full host config and must never be PUT as one. No probes or activation occur
+   merely because the key is supplied.
+
+Use restrictions that matter before selecting a workload:
+- Free hosted access is for trial/internal testing and evaluation, not production.
+  The trial's generated content also cannot be used in production under those
+  rights. Do not send confidential/private code or sensitive data to the trial.
+- A separate paid NVIDIA/partner subscription is needed for production or use
+  after available credits. Turning stayWithinFree off does not buy a plan or
+  change those rights. NVIDIA model licenses may impose additional conditions.
+- Nothing here consumes paid usage, changes routing/quality bars, activates
+  agents, rotates existing keys or deploys a plugin.
+
+Sources:
+https://developer.nvidia.com/nim
+https://forums.developer.nvidia.com/t/nvidia-nim-faq/300317
+https://assets.ngc.nvidia.com/products/api-catalog/legal/NVIDIA%20API%20Trial%20Terms%20of%20Service.pdf
+https://developer.nvidia.com/legal/terms

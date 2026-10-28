@@ -8,7 +8,7 @@ import (
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 
-	"github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/internal/providermodule"
+	"github.com/TogetherWeOwn/cpa-plugin-subscription-pool/internal/providermodule"
 )
 
 // zaiModule adapts the existing pluginRuntime to the coordinator-facing
@@ -75,6 +75,12 @@ func (m *zaiModule) Pick(_ context.Context, req pluginapi.SchedulerPickRequest) 
 
 func (m *zaiModule) HandleUsage(_ context.Context, record pluginapi.UsageRecord) error {
 	return m.runtime.handleUsage(record)
+}
+
+// UsageAccount names the Z.ai account a usage record belongs to, for the
+// coordinator's usage ledger.
+func (m *zaiModule) UsageAccount(record pluginapi.UsageRecord) string {
+	return m.runtime.accountNameForAuthID(record.AuthID)
 }
 
 func (m *zaiModule) Status(_ context.Context) (json.RawMessage, error) {

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-`subscription-pool` (repository `cpa-plugin-zai-coding-plan`) is a native CLIProxyAPI (CPA) plugin. It is a neutral coordinator that hosts one or more provider modules behind a single CPA scheduler/usage-plugin slot; today it hosts exactly one, `zai`, which makes a pool of Z.ai GLM Coding Plan subscriptions behave as quota-aware logical accounts across CPA's Anthropic and OpenAI-compatible lanes.
+`subscription-pool` (repository `cpa-plugin-subscription-pool`, formerly `cpa-plugin-zai-coding-plan`) is a native CLIProxyAPI (CPA) plugin. It is a neutral coordinator that hosts one or more provider modules behind a single CPA scheduler/usage-plugin slot; today it hosts three: `zai`, `opencode-go`, and `synthetic`. The `zai` module makes a pool of Z.ai GLM Coding Plan subscriptions behave as quota-aware logical accounts across CPA's Anthropic and OpenAI-compatible lanes; `opencode-go` pools OpenCode Go accounts; `synthetic` schedules synthetic.new paid credits with fallback to the free infinite mode.
 
 Version 0.1 (zai module):
 
@@ -12,6 +12,12 @@ Version 0.1 (zai module):
 4. expose authenticated management status and recovery operations.
 
 The plugin does not proxy inference, rewrite requests, or mint credentials. The zai module's primary quota signal is `GET https://api.z.ai/api/monitor/usage/quota/limit`, queried per account with that account's plan key. Local accounting is a conservative fallback when the endpoint fails, and an observed upstream `429` remains authoritative.
+
+## Published identity and management integration
+
+The registered display name is **Subscription Pool: Z.ai · OpenCode Go · synthetic.new**. The host-facing ID remains `subscription-pool`, independently of `Metadata.Name`; library filenames, config keys, state directories, model aliases and API routes do not change with branding. `Metadata.Logo` is a base64 SVG data URI embedded from `src/logo.svg`, so rendering makes no external asset request. The registry and the existing **Usage and Quota** resource menu describe all three providers.
+
+SDK v7.2.154's metadata has no description field and its capabilities have no quota provider. `supports_quota` therefore remains false; no unsupported quota RPCs are advertised. The patched v8 host's newer quota-provider contract needs a separate SDK/handler compatibility change. See [the three-provider Management Center proposal](management-center-quota-proposal.md) for the verified ABI fields, current menu integration and native-bridge requirements.
 
 ## Exact CLIProxyAPI plugin contract
 
@@ -136,7 +142,7 @@ The coordinator/provider split gives each provider module a compiler-enforced pr
 ├── src/
 │   ├── plugin.go             # envelope/wire-error types, plugin registration metadata
 │   ├── plugin_linux.go       # C ABI init/call/free/shutdown
-│   └── runtime_state.go      # var runtimeState = coordinator.New(zai.New())
+│   └── runtime_state.go      # var runtimeState = coordinator.New(zai, opencodego, synthetic)
 ├── internal/
 │   ├── providermodule/
 │   │   └── interface.go      # Module interface + HostConfig; the coordinator/provider boundary
@@ -157,6 +163,12 @@ The coordinator/provider split gives each provider module a compiler-enforced pr
 │   │   ├── scheduler.go      # degraded-mode healthy selection
 │   │   ├── management.go     # zai's own management routes/handlers
 │   │   └── runtime.go        # zai runtime state machine
+│   ├── providers/opencodego/ # OpenCode Go quota-aware pooling
+│   ├── providers/synthetic/
+│   │   ├── module.go         # paid/infinite lanes, threshold + concurrency scheduling, usage learning, status
+│   │   ├── quota.go          # GET /v2/quotas and x-synthetic-quotas parsing
+│   │   ├── labels.go         # public ordinal lane names, persisted per credential
+│   │   └── config.go         # providers.synthetic schema
 │   ├── securestore/          # generic 0700/0600, symlink-rejecting, atomic-replace storage
 │   └── testfixture/          # shared CPA config fixture builder for tests
 ├── config.example.yaml
@@ -377,7 +389,7 @@ The coordinator, not any individual provider module, holds this single scheduler
 1. **No overlapping ownership.** The dispatch registry (`authID -> providerID`) is rebuilt from every module's `OwnedAuthIDs()` after each successful reconfigure, staged then swapped atomically. If any auth ID is claimed by more than one module, the whole reconfigure fails and the previous registry stays live.
 2. **Zero recognizing modules -> unhandled.** The coordinator calls every module's `Recognize` on the incoming candidates before calling any module's `Pick`. If none recognize any candidate, it returns `Handled:false` so unrelated providers remain untouched.
 3. **More than one recognizing module -> fail closed.** If candidates in one request are recognized by more than one module, the coordinator returns a `coordinator_mixed_provider_pick` error rather than calling any module's `Pick`.
-4. **Usage dispatches strictly by auth ID.** `usage.handle` looks up `record.AuthID` in the registry and never trusts a self-reported provider field on the record; an auth ID the registry does not map to any hosted module is a silent no-op, matching CPA's own behavior for usage records belonging to unrelated providers.
+4. **Usage dispatches by auth ID first.** `usage.handle` looks up `record.AuthID` in the registry, and a registry match always wins over the record's self-reported provider field. Only when no module owns the auth ID does the coordinator ask modules that implement the optional `providermodule.UsageRecognizer`; it dispatches when exactly one claims the record (the synthetic module claims records from its configured provider names, which keeps quota learning working after a key is re-pasted and the host derives a new auth ID). No claimant, or more than one, is a silent no-op, matching CPA's own behavior for usage records belonging to unrelated providers.
 5. **Recognized-but-unmanaged or all-impaired never silently falls back.** Exactly one module recognizes the candidates, and the coordinator propagates that module's own `Pick` result verbatim, including any hard scheduler error such as `zai_unmanaged_candidate` or `zai_no_capacity`.
 6. **Never blend domains.** A structural consequence of invariant 3: no code path can merge two modules' pick results, because a mixed-recognition request never reaches any module's `Pick`.
 
@@ -391,6 +403,25 @@ For the zai module's own `Pick`, called only once the coordinator has establishe
 6. If the request contains managed Z.ai candidates but no healthy managed candidate remains, return a scheduler error; `Handled:false` would fall back to built-in selection in v7.2.150 and is forbidden on this path. When at least one of those accounts is only `throttled`, the error is the retryable `zai_rate_limited` with `http_status: 429`, which CPA forwards as a 429 so the client retries in seconds. Otherwise it is the non-retryable `zai_no_capacity` (HTTP 500). The `zai_rate_limited` message must never contain "no healthy managed ... capacity remains": the model router quarantines the whole lane for 15 minutes on that phrase. CPA already retries a request on another credential after an upstream failure, so while any sibling account is healthy the throttled account is simply skipped.
 7. If the request contains no recognized Z.ai candidate, return `Handled:false` (so the coordinator's invariant 2 branch is unreachable here — Recognize already filtered this module out).
 
+### synthetic module
+
+`internal/providers/synthetic` schedules synthetic.new subscription credentials. A synthetic.new plan has a single weekly credit limit that regenerates 2% every 202 minutes (no five-hour window and no lockout); the Big plan adds infinite mode, the model alias `infinite:small:vision`, which never counts against the weekly limit, runs much slower, and requires `stream: true`.
+
+The host config declares two OpenAI-compatible providers with the same key: a paid provider (default name `synthetic`) and an infinite provider (default `synthetic-infinite`) at a lower `priority`. An alias served by both (for example `synthetic/deepseek-v4.1-flash` -> `hf:deepseek-ai/DeepSeek-V4.1-Flash` on the paid provider and `infinite:small:vision` on the infinite one) gets automatic fallback:
+
+1. Lanes are discovered from the host's `openai-compatibility` entries on every reconfigure, with auth IDs derived exactly as the host derives them. Candidates are also recognized by `compat_name`/provider key, so a re-keyed credential is still recognized. A credential seen at runtime but not in the last reconfigure (a learned lane) is bound to its provider's account when that provider uses exactly one; a learned paid lane that cannot be bound (two or more accounts, or none) fails closed: it is never admitted, because its spend cannot be checked against any weekly limit, and requests go to infinite mode or get the retryable `synthetic_no_capacity` until the next reconfigure binds it.
+2. A paid lane is available while its account's weekly usage, projected forward through the regeneration ticks that have passed since the last reading, is below `threshold-percent` (default 95), the account is not in a learned 429/402 exhaustion window, the lane is not resting after a rate-limit 429, and it is under `max-concurrent` (0 = no local cap).
+3. `Pick` returns a paid lane (round-robin) when one is available; otherwise an available infinite lane (counted as a fallback); otherwise a retryable `synthetic_no_capacity` / `synthetic_infinite_busy` error with HTTP 429. It never lets a request reach a paid credential that is at the threshold, so a plan with extra usage enabled does not spill into usage-based billing. A candidate set that also contains another provider's credentials makes the module decline (`Handled:false`).
+4. Quota comes from `GET <origin>/v2/quotas` (free; polled every `quota-refresh-interval`, default 2m, only for real keys, never for placeholder keys such as `<API KEY PLACEHOLDER>`) and from the `x-synthetic-quotas` header on every response. A paid 429 or 402 parks the account until the reported `nextRegenAt` or `failure-cooldown`; a paid 429 whose header still shows credits rests only that lane for `infinite-cooldown`; an infinite-mode 429 rests the infinite lane for `infinite-cooldown`.
+5. In-flight slots are released by the matching usage record and expire after `in-flight-ttl`, so a lost record cannot wedge a capped lane.
+6. Status reports per-lane health, the projected weekly usage, the next regeneration tick, in-flight counts, routing counters, and measured throughput (output tokens per second excluding time to first token, plus mean time to first token) so paid and infinite speed can be compared directly.
+
+The plugin registers `scheduler_across_priorities` so CLIProxyAPI v8 hosts offer both priority tiers to the scheduler; without it the infinite lane would be invisible until the paid credential was already cooling down. Picks no module recognizes still return `Handled:false`, and the host's selector then applies its normal priority order.
+
+### Inactive modules
+
+A module with nothing to manage claims nothing: the zai module with no Z.ai credential in the host config, the OpenCode Go module with `enabled: false` or no accounts, and the synthetic module with no matching providers or `enabled: false` all return `Recognize == false` and own no auth IDs. Their providers' traffic goes to the host's own scheduler, and a missing Z.ai plan no longer prevents the plugin from registering. A `providers.zai.accounts` override with no Z.ai credential in the host config still fails reconfigure (`accounts[0]: key-suffix matches no account`), exactly as an unmatched override does when credentials exist: the override names an account the operator expects, so it is never silently dropped.
+
 The scheduler performs no disk, network, or host callback while holding its lock. Contract tests assert the all-impaired module error propagates through the coordinator and `pluginhost.PickAuth` with `handled=true` and cannot fall back to a known-bad credential.
 
 ## Management API
@@ -399,6 +430,7 @@ The scheduler performs no disk, network, or host callback while holding its lock
 
 | Method/path | Owner | Purpose |
 |---|---|---|
+| `GET /v0/management/plugins/subscription-pool/usage` | coordinator | Usage page data (`?range=` (`1h`, `6h`, `24h` or `7d`), default `24h`): ledger buckets and totals per provider, account and model; normalized quota cards (used/remaining percent, reset or regeneration time, window start and length); the synthetic.new panel (regeneration schedule, per-lane in-flight, peak and cap, measured speed, routing counters). Same body as the unauthenticated `usage.json` resource, plus `ledger.persist_error_detail` (the text behind a `persist_error` code). |
 | `GET /v0/management/plugins/subscription-pool/status` | coordinator | Aggregated status: `{"plugin":"subscription-pool","status":...,"providers":{"<id>":<module's own Status() JSON>}}`. Callers reading a specific provider's fields (e.g. `accounts`) must unwrap `providers.<id>` first. |
 | `GET /v0/management/plugins/zai-coding-plan/status` | zai module | Redacted utilization/reset state, quota source and freshness, off-peak state, health, and warnings. This is also exactly the JSON aggregated under `providers.zai` in the coordinator's own status route above. |
 | `POST /v0/management/plugins/zai-coding-plan/refresh` | zai module | Poll quota now, compact fallback state, and recompute health. |
@@ -409,7 +441,11 @@ Collector-facing zai status is locked by `internal/providers/zai/testdata/status
 
 The host collector writes its separate sanitized lane file only beneath a pre-created root-owned real directory. It rejects symlinked or substituted output parents, holds an `O_DIRECTORY|O_NOFOLLOW` descriptor across mode enforcement, same-directory temporary creation, atomic replacement, and directory fsync, and writes the final file as mode `0600`. This root-owned collector output is distinct from the unprivileged CPA state directory below.
 
-CPA must reject unauthenticated management HTTP requests before dispatch. The coordinator itself (not any individual module) registers `/v0/resource/plugins/subscription-pool/status` as the "Subscription Quota" Management Center menu entry, since it is the only party that can see every hosted provider's status. CPA deliberately dispatches resource routes without management authentication, so this page is rendered entirely server-side from the coordinator's own `managementStatus()` aggregation (the same redacted, non-secret fields exposed on the authenticated status route) with a restrictive content-security policy; no management or dashboard credential is ever embedded in the page.
+CPA must reject unauthenticated management HTTP requests before dispatch. The coordinator itself (not any individual module) registers the **Usage and Quota** Management Center menu entry at `/v0/resource/plugins/subscription-pool/status`, since it is the only party that can see every hosted provider. The page follows the official Management Center's Dashboard and Quota Management design (same palette, type, components and layout) and is one self-contained HTML document: inline styles, one inline script allowed by a per-response CSP nonce (`default-src 'none'; script-src 'nonce-...'; style-src 'unsafe-inline'; img-src data:; connect-src 'self'; base-uri 'none'; form-action 'none'`), no external assets, and no `frame-ancestors`, so a cross-origin Management Center can still frame it. Its first payload is embedded as JSON (`json.Marshal` escapes `<`, `>` and `&`, so data cannot close the element); it then refreshes from `/v0/resource/plugins/subscription-pool/usage.json?range=` (`1h`, `6h`, `24h` or `7d`) every 30 seconds. CPA dispatches resource routes without management authentication, so both carry only redacted fields: provider IDs, account display names (synthetic lanes are `<provider>#<ordinal>`, never derived from a credential), model aliases, counters, quota percentages, reset times, and closed-vocabulary codes for health reasons (`quota_exhausted`, `at_threshold`, `concurrency_cap`, `resting`, `unbound_credential`, `placeholder_key`, `other`) and quota sources (`authoritative`, `quota_poll`, `response_header`, `429_derived`, `estimate`, `free`, `observed`, `unknown`). Never a key, key fragment or fingerprint, auth ID, client API key, request content, management credential, or free text: upstream error bodies, health and fallback reasons and validation errors stay on the authenticated status route, and the page reports only that a reconfigure was rejected. The same JSON is available on the authenticated `GET /v0/management/plugins/subscription-pool/usage`, which adds only `ledger.persist_error_detail`. Credential-derived identifiers (the synthetic `auth_id` and `account` fingerprint, the zai `identity`) stay on the authenticated status route.
+
+### Usage ledger
+
+`internal/usage` counts every usage record a hosted module accepts (owned auth ID or a single `UsageRecognizer` claim), keyed by provider, account display name (from the optional `providermodule.UsageAttributor`, called after `HandleUsage`) and model alias: requests, failures (429, other 4xx, 5xx), input/output/reasoning/cached tokens, latency, time to first token, and output speed (output tokens over generation time, for successful responses of at least 20 tokens and 100 ms). Two tiers bound memory: 5-minute buckets for 48 hours and 1-hour buckets for 8 days, at most 100 ordinary rows per bucket (the rest fold into one reserved `(other)` row per provider, which never takes an ordinary slot, so a restored bucket keeps every row it saved); labels are cut to 120 bytes on a rune boundary. The coordinator saves the ledger at most every 5 minutes, in the background, and synchronously on shutdown, to `<auth-dir>/subscription-pool/usage/ledger.state` through `securestore` (0700 directory, 0600 file, atomic rename). The file stores each label once and each row as `[label index, counters...]`, and is kept under 6 MiB (securestore's limit is 8 MiB): the budget counts every byte as `encoding/json` writes it (escaped `<`, `>`, `&` and control characters, exact digits), and buckets of both tiers are kept newest first, so trimming only ever drops the oldest history and the 1h, 6h and 24h views keep their newest fine buckets before any older coarse bucket. When a tier loses buckets, the file records from when that tier is complete (`fine_from`, `coarse_from`), and a report whose range starts earlier carries `usage.complete_from` so the page says the earlier buckets undercount. The ledger is marked clean only after a write succeeds, so a failed save is retried by the next save or the shutdown flush. Saves go only to a directory whose saved ledger has loaded (or had none): a file that fails to load (corrupt, from a newer version, unreadable) is never overwritten, the load is retried on every reconfigure, and records counted meanwhile are kept in memory and merged when it succeeds. Once loaded, the ledger stays in that directory until the plugin restarts, so a runtime `auth-dir` change never replaces the history saved in the new directory. The name has no `.json` suffix because the host parses every `*.json` file under the auth directory as a possible credential. Every persistence failure is soft and shows on the page as a closed code (`ledger.persist_error`: `open_failed`, `read_failed`, `decode_failed`, `write_failed`); the error text, which can carry file paths, is only on the authenticated usage route (`ledger.persist_error_detail`). Scheduling never waits on persistence.
 
 ## Persistence and concurrency
 
@@ -418,11 +454,15 @@ The coordinator namespaces all on-disk state under its own plugin ID, then gives
 ```text
 <auth-dir>/subscription-pool/
 ├── manifest.json              # coordinator-owned, diagnostic only — never read back for dispatch
+├── usage/
+│   └── ledger.state           # coordinator-owned usage history (see Usage ledger)
 └── providers/
     ├── zai/
     │   ├── settings.json
     │   ├── state.json
     │   └── settings.recovery.json  # transient during settings commit recovery
+    ├── synthetic/
+    │   └── lane-labels.state       # auth ID -> public lane ordinal; server-side only
     └── opencode-go/                # reserved, empty stub — no module implemented yet
 ```
 
