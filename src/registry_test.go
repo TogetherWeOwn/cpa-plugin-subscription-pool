@@ -33,7 +33,7 @@ func TestRegistry(t *testing.T) {
 	if entry.Name != "Subscription Pool: Z.ai · OpenCode Go · synthetic.new" {
 		t.Fatalf("store name = %q", entry.Name)
 	}
-	for _, provider := range []string{"Z.ai", "OpenCode Go", "synthetic.new", "Cloudflare Workers AI", "NVIDIA NIM"} {
+	for _, provider := range []string{"Z.ai", "OpenCode Go", "synthetic.new", "Cloudflare Workers AI", "NVIDIA NIM", "OpenRouter"} {
 		if !strings.Contains(entry.Description, provider) {
 			t.Fatalf("store description must cover %s", provider)
 		}

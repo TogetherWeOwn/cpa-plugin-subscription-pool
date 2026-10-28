@@ -204,11 +204,11 @@ ul.notes{margin:0;padding-left:18px;font-size:12px;color:var(--text-tertiary)}
 .qplan span b{font-weight:600;color:var(--text-primary);margin-left:6px}
 .qrow{display:flex;flex-direction:column;gap:5px;min-width:0}
 /* Guard windows explain billing/rate boundaries: never truncate their labels. */
-.qcard.nvidia-nim,.qcard.cloudflare-workers-ai{min-width:0}
-.qcard.nvidia-nim .qrow-head,.qcard.cloudflare-workers-ai .qrow-head{flex-direction:column;align-items:flex-start;gap:3px}
-.qcard.nvidia-nim .qlabel,.qcard.cloudflare-workers-ai .qlabel{white-space:normal;overflow-wrap:anywhere}
-.qcard.nvidia-nim .qmeta,.qcard.cloudflare-workers-ai .qmeta{max-width:100%;flex-wrap:wrap}
-.qcard.nvidia-nim .qplan,.qcard.cloudflare-workers-ai .qplan{overflow-wrap:anywhere}
+.qcard.nvidia-nim,.qcard.cloudflare-workers-ai,.qcard.openrouter-free{min-width:0}
+.qcard.nvidia-nim .qrow-head,.qcard.cloudflare-workers-ai .qrow-head,.qcard.openrouter-free .qrow-head{flex-direction:column;align-items:flex-start;gap:3px}
+.qcard.nvidia-nim .qlabel,.qcard.cloudflare-workers-ai .qlabel,.qcard.openrouter-free .qlabel{white-space:normal;overflow-wrap:anywhere}
+.qcard.nvidia-nim .qmeta,.qcard.cloudflare-workers-ai .qmeta,.qcard.openrouter-free .qmeta{max-width:100%;flex-wrap:wrap}
+.qcard.nvidia-nim .qplan,.qcard.cloudflare-workers-ai .qplan,.qcard.openrouter-free .qplan{overflow-wrap:anywhere}
 .qrow-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px}
 .qlabel{font-weight:600;font-size:12.5px;color:var(--text-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .qmeta{display:inline-flex;gap:7px;align-items:baseline;font:11.5px var(--mono);flex-shrink:0}
@@ -360,7 +360,7 @@ ul.notes{margin:0;padding-left:18px;font-size:12px;color:var(--text-tertiary)}
   'use strict';
   var NS = 'http://www.w3.org/2000/svg';
   var DASH = '—';
-  var PROVIDER_GLYPH = { zai: 'Z', 'opencode-go': 'G', synthetic: 'S', 'cloudflare-workers-ai': 'C', 'nvidia-nim': 'N' };
+  var PROVIDER_GLYPH = { zai: 'Z', 'opencode-go': 'G', synthetic: 'S', 'cloudflare-workers-ai': 'C', 'nvidia-nim': 'N', 'openrouter-free': 'O' };
   var RANGE_LABEL = { '1h': '1 h', '6h': '6 h', '24h': '24 h', '7d': '7 d' };
   /* The data route is unauthenticated, so reasons and sources arrive as
      closed codes; the authenticated status route has the free text. */
@@ -382,6 +382,10 @@ ul.notes{margin:0;padding-left:18px;font-size:12px;color:var(--text-tertiary)}
     unverified_model: 'No verified free model mapping; requests refused',
     free_exhausted: 'Free allowance or local request ceiling exhausted; no automatic credit reset',
     trial_expired: 'The configured trial expiration has been reached',
+    catalog_unverified: 'OpenRouter free-model list not verified yet; requests refused',
+    stale_catalog: 'OpenRouter free-model list is stale; requests refused until the next successful sync',
+    daily_limit: 'Daily free-request limit reached; resets at 00:00 UTC',
+    model_not_free: 'Model is not on the current OpenRouter free list; requests refused',
     other: 'Unavailable; see the authenticated status route'
   };
   var SOURCES = { authoritative: 'authoritative', quota_poll: 'quota poll', response_header: 'response header', '429_derived': '429-derived', estimate: 'estimate', free: 'free, not metered', observed: 'observed', analytics_reservations: 'analytics + conservative local debits (not a billing guarantee)', local_reservation: 'local admissions, not provider balance', unknown: 'unknown' };
@@ -932,7 +936,7 @@ ul.notes{margin:0;padding-left:18px;font-size:12px;color:var(--text-tertiary)}
     if (!slice.length) grid.appendChild(el('div', 'empty', all.length ? 'No account matches the search.' : 'No accounts are configured yet.'));
     slice.forEach(function (q, idx) {
       var c = el('article', 'qcard'); c.style.animationDelay = Math.min(idx * 40, 360) + 'ms';
-      if (q.provider === 'nvidia-nim' || q.provider === 'cloudflare-workers-ai') c.classList.add(q.provider);
+      if (q.provider === 'nvidia-nim' || q.provider === 'cloudflare-workers-ai' || q.provider === 'openrouter-free') c.classList.add(q.provider);
       var h = el('div', 'qhead'); var ic = el('span', 'qicon'); ic.appendChild(provIcon(q.provider)); h.appendChild(ic);
       var nm = el('span', 'qname', q.account); nm.title = q.provider_label + ' · ' + q.account; h.appendChild(nm);
       var pill = el('span', 'pill ' + q.health, q.health); if (q.reason) pill.title = reasonText(q.reason); h.appendChild(pill); c.appendChild(h);

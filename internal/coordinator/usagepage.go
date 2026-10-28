@@ -39,6 +39,7 @@ var providerLabels = map[string]string{
 	"synthetic":             "synthetic.new",
 	"cloudflare-workers-ai": "Cloudflare Workers AI",
 	"nvidia-nim":            "NVIDIA NIM",
+	"openrouter-free":       "OpenRouter free models",
 }
 
 func providerLabel(id string) string {
@@ -269,6 +270,8 @@ func (c *Coordinator) buildUsagePageData(rangeID string, authenticated bool) usa
 			cards = cloudflareQuotaCards(raw)
 		case "nvidia-nim":
 			cards = nvidiaQuotaCards(raw)
+		case "openrouter-free":
+			cards = openrouterQuotaCards(raw)
 		case "synthetic":
 			var panel *syntheticPanel
 			cards, panel = syntheticQuotaCards(raw, now)

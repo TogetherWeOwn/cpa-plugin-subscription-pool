@@ -4,7 +4,7 @@
     {
       "id": "subscription-pool",
       "name": "Subscription Pool: Z.ai · OpenCode Go · synthetic.new",
-      "description": "Quota-aware pooling for Z.ai Coding Plan, OpenCode Go, synthetic.new, Cloudflare Workers AI and NVIDIA NIM, with safe-default included/free-use guards, shared usage history and quota management.",
+      "description": "Quota-aware pooling for Z.ai Coding Plan, OpenCode Go, synthetic.new, Cloudflare Workers AI, NVIDIA NIM and auto-synced OpenRouter free models, with safe-default included/free-use guards, shared usage history and quota management.",
       "author": "TogetherWeOwn",
       "version": "0.7.0",
       "repository": "https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool",
@@ -16,7 +16,7 @@
         "archive": "subscription-pool_0.7.0_linux_amd64.zip",
         "checksums": "checksums.txt"
       },
-      "tags": ["Z.AI", "GLM", "Coding Plan", "OpenCode Go", "synthetic.new", "Cloudflare Workers AI", "NVIDIA NIM", "quota", "pool"]
+      "tags": ["Z.AI", "GLM", "Coding Plan", "OpenCode Go", "synthetic.new", "Cloudflare Workers AI", "NVIDIA NIM", "OpenRouter", "quota", "pool"]
     }
   ]
 }
