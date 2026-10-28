@@ -8,10 +8,94 @@ claude-api-key:
     prefix: zai
 
 openai-compatibility:
+  # NVIDIA is initially blocked until account/model entitlement and permitted
+  # trial use are verified below. Catalog presence alone is not free entitlement.
+  - name: nvidia-nim
+    disabled: true
+    base-url: https://integrate.api.nvidia.com/v1
+    api-key-entries:
+      - api-key: ${NVIDIA_NIM_API_KEY}
+    models:
+      - name: z-ai/glm-5.3-flash
+        alias: nvidia-nim/glm-5.3-flash
   - name: zai-coding-plan
     base-url: https://api.z.ai/api/coding/paas/v4
     api-key-entries:
       - api-key: ${ZAI_CODING_PLAN_KEY}
+  # synthetic.new: the infinite-mode provider (Big plan, free, slow, streaming
+  # only) sits at a lower priority and also serves the paid DeepSeek alias, so
+  # the synthetic module can fall back to it when the weekly credits run low.
+  - name: synthetic-infinite
+    priority: -1
+    base-url: https://api.synthetic.new/openai/v1
+    api-key-entries:
+      - api-key: ${SYNTHETIC_API_KEY}
+    models:
+      - name: "infinite:small:vision"
+        alias: synthetic-infinite/deepseek-v4.1-flash
+      - name: "infinite:small:vision"
+        alias: synthetic/deepseek-v4.1-flash
+  - name: synthetic
+    base-url: https://api.synthetic.new/openai/v1
+    api-key-entries:
+      - api-key: ${SYNTHETIC_API_KEY}
+    models:
+      - name: "hf:deepseek-ai/DeepSeek-V4.1-Flash"
+        alias: synthetic/deepseek-v4.1-flash
+      - name: "hf:moonshotai/Kimi-K3"
+        alias: synthetic/kimi-k3
+
+  # Render these placeholders through the operator's secret channel first;
+  # CLIProxy does not expand shell variables. Keep disabled until the scoped
+  # token, live GraphQL schema and single-scheduler ownership are verified.
+  - name: cloudflare-workers-ai
+    disabled: true
+    base-url: https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/ai/v1
+    api-key-entries:
+      - api-key: ${CLOUDFLARE_WORKERS_AI_TOKEN}
+    models:
+      - name: "@cf/qwen/qwen3-30b-a3b-fp8"
+        alias: cloudflare-workers-ai/qwen3-30b-a3b-fp8
+        max-context-length: 32768
+        input-modalities: [text]
+        thinking: {} # no verified reasoning_effort levels
+      - name: "@cf/zai-org/glm-4.7-flash"
+        alias: cloudflare-workers-ai/glm-4.7-flash
+        max-context-length: 131072
+        input-modalities: [text]
+        thinking: {}
+      # Larger/multimodal models below are deliberately refused by the
+      # included-only scheduler. stayWithinIncluded: false allows PAYG.
+      - name: "@cf/openai/gpt-oss-120b"
+        alias: cloudflare-workers-ai/gpt-oss-120b
+        max-context-length: 128000
+        input-modalities: [text]
+        thinking: {levels: [low, medium, high]}
+      - name: "@cf/zai-org/glm-5.3"
+        alias: cloudflare-workers-ai/glm-5.3
+        max-context-length: 1048576
+        input-modalities: [text, image]
+        thinking: {levels: [low, high, max]}
+      - name: "@cf/zai-org/glm-5.3-flash"
+        alias: cloudflare-workers-ai/glm-5.3-flash
+        max-context-length: 1048576
+        input-modalities: [text, image]
+        thinking: {levels: [low, high, max]}
+      - name: "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+        alias: cloudflare-workers-ai/deepseek-v4.1-flash-1017
+        max-context-length: 1048576
+        input-modalities: [text, image]
+        thinking: {levels: [none, low, high, max]}
+      - name: "@cf/moonshotai/kimi-k2.7-code"
+        alias: cloudflare-workers-ai/kimi-k2.7-code
+        max-context-length: 262144
+        input-modalities: [text, image]
+        thinking: {}
+      - name: "@cf/qwen/qwen3.8-27b"
+        alias: cloudflare-workers-ai/qwen3.8-27b
+        max-context-length: 262144
+        input-modalities: [text, image]
+        thinking: {levels: [low, medium, xhigh]}
 
 plugins:
   enabled: true
@@ -22,6 +106,15 @@ plugins:
       priority: 1000
       cpa-config-path: /app/config.yaml
       providers:
+        nvidia-nim:
+          stayWithinFree: true
+          # Trial/internal evaluation only, no confidential input or production
+          # output. See README's governing-terms links before confirming.
+          free-tier-confirmed: false
+          requests-per-minute: 0  # unknown, so free-only admission is blocked
+          free-models: []         # verified exact upstream IDs, not aliases
+          free-request-limit: 0  # optional local lifetime ceiling, never a credit grant
+          # trial-expires-at: "2026-11-01T00:00:00Z"  # only the account's actual expiry
         zai:
           quota-refresh-interval: 2m
           authoritative-max-age: 5m
@@ -53,3 +146,24 @@ plugins:
               # Overrides the module-level dashboard-api-key above for this
               # account. Required whenever accounts do not share one key.
               dashboard-api-key: ${OPENCODE_GO_A_DASHBOARD_KEY}
+        synthetic:
+          # Stop new paid requests at this share of the weekly credits; aliases
+          # the infinite provider also serves move to infinite mode instead.
+          threshold-percent: 95
+          # GET /v2/quotas does not count against the plan. "0" disables
+          # polling and relies on the x-synthetic-quotas response header.
+          quota-refresh-interval: 2m
+          # Synthetic publishes no concurrency limit. Set these from your own
+          # measurements; 0 means no local cap.
+          max-concurrent: 0
+          infinite-max-concurrent: 0
+          # Defaults shown; rename only if your providers use other names.
+          paid-providers: [synthetic]
+          infinite-providers: [synthetic-infinite]
+        cloudflare-workers-ai:
+          enabled: true
+          stayWithinIncluded: true # false explicitly permits normal PAYG
+          safety-margin-neurons: 500
+          usage-refresh-interval: 30s
+          usage-max-age: 2m
+          providers: [cloudflare-workers-ai]

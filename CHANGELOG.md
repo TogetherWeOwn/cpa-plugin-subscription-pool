@@ -6,7 +6,59 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-24
+
+### Added
+
+- Cloudflare Workers AI module with `stayWithinIncluded: true` by default. Account-wide daily neuron admission uses durable worst-case model reservations plus fresh analytics and a safety margin; stale/unknown usage, unbound credentials, unbounded models and corrupt storage fail closed. `false` explicitly permits PAYG; returning to included-only preserves the cross-midnight PAYG completion fence.
+- NVIDIA NIM module with `stayWithinFree: true` by default. Admission requires verified account/model free entitlement, an exact upstream-model allowlist and a positive verified RPM cap. All keys share durable local reservations, an optional lifetime request ceiling and sticky observed exhaustion; no monthly credit grant is invented. Trial access and outputs remain internal-evaluation-only under NVIDIA's governing terms.
+- Usage and Quota support for both providers: Cloudflare daily UTC allowance, separate analytics/local debits, safety margin and a non-pooled calendar projection; NVIDIA guard state, local shared RPM and lifetime admissions rather than a provider balance. Both example host lanes start disabled pending credential/entitlement verification.
+- Combined throwaway-host fixtures exercise both guards with dummy API-key entries only, including Cloudflare boundary/PAYG/re-enable transitions and NVIDIA streaming, tools, free ceiling and disabled-lane behavior. No live model comparison or paid inference is needed.
+- Both guards match model routes case-insensitively, as the host does, so a case variant of an alias cannot route to a costlier or non-free upstream. Each guard also strips only its own provider prefix from a route, so "x" and "<provider>/x" share one key while another provider's prefix stays part of the route.
+- An NVIDIA 429 whose body mentions credits or a trial latches sticky free exhaustion, like a 402, until an operator re-verifies the entitlement. One that mentions only a quota or a daily/monthly limit backs off for at least an hour, durably across restarts, without latching; a longer `Retry-After` still wins.
+- Cloudflare persists the PAYG completion fence before dispatching a PAYG request and refuses the request if it cannot. Reservations whose usage callback never arrives expire six hours after admission, and callbacks for a key replaced while its requests were running still drain them.
+- Cloudflare account labels (`workers-ai#N`) are stored durably and never shift or get reused when accounts are added or removed.
+- CI renders the quota page exported by a real host in a browser at desktop and mobile sizes.
+
+## [0.6.1] - 2026-10-23
+
 ### Fixed
+
+- The official plugin list now identifies the coordinator as **Subscription Pool: Z.ai · OpenCode Go · synthetic.new**, with an embedded, self-contained SVG logo and the renamed source repository. The plugin-store description covers all three providers. The stable `subscription-pool` ID, model aliases, configuration, scheduling and persisted usage are unchanged.
+- README install/config examples now use the current artifact names and nested three-provider configuration instead of the retired Z.ai-only plugin. The Management Center quota proposal covers all three modules, the existing Usage and Quota menu, and the actual SDK limitation: v7.2.154 has no quota-provider capability or metadata description field; native v8 quota bridging remains separate, compatibility-tested work rather than an unsupported advertised flag.
+
+## [0.6.0] - 2026-10-23
+
+### Added
+
+- Usage and Quota page: the plugin's Management Center page is rebuilt to the official Dashboard and Quota Management design. It adds time ranges (1 h, 6 h, 24 h, 7 d), provider tabs, search and a model filter; success-rate, token, account and speed tiles; a throughput chart with a data table; per-provider, per-account and per-model usage (requests, error rate, 429s, tokens, latency, time to first token, tokens per second); quota cards with remaining-percent bars, reset times and countdowns; a two-week quota-window timeline; and a synthetic.new panel with the weekly-credit refill schedule, infinite-mode usage and speed, and per-lane concurrency. The menu entry is now **Usage and Quota**.
+- `internal/usage`: a bounded usage ledger (5-minute buckets for 48 h, 1-hour buckets for 8 days, 100 rows per bucket plus one reserved overflow row per provider) fed by every usage record a hosted module accepts, saved every 5 minutes and on shutdown to `<auth-dir>/subscription-pool/usage/ledger.state` in a compact encoding kept under 6 MiB. The size budget counts the exact JSON bytes (escaped labels included) and keeps the newest buckets of both tiers first; when older history has to be dropped, `usage.complete_from` says from when the shown range is complete. A failed save stays pending and is retried; a saved ledger that fails to load is never overwritten (the load is retried on every reconfigure), and a runtime `auth-dir` change applies to the ledger at the next restart; a restored bucket keeps every row it saved.
+- `GET /v0/management/plugins/subscription-pool/usage` and the resource route `usage.json` serve the page's redacted data: health reasons, quota sources and history-save failures (`ledger.persist_error`) as closed codes, no upstream error text, validation error or file path. The authenticated route adds `ledger.persist_error_detail`.
+- `providermodule.UsageAttributor` lets a module name the account a usage record belongs to; the zai, OpenCode Go and synthetic modules implement it.
+- synthetic status reports `peak_in_flight` and `peak_in_flight_at` per lane.
+
+### Changed
+
+- synthetic lane names are ordinals per provider (`synthetic#1`, `synthetic-infinite#2`), never derived from a credential, and they stick to their credential: the auth ID to ordinal assignment is kept server-side in `<auth-dir>/subscription-pool/providers/synthetic/lane-labels.state`, so reordering api-key entries, live or across a restart, no longer moves a name, or the usage history keyed by it, to another key. A new credential takes its provider's lowest free ordinal (a rotated key inherits the replaced key's name). Learned lanes are `<provider>#learned-<n>`. A label-store failure is soft and shows as `lane_labels_error` on the authenticated status; an unreadable label file is never overwritten.
+- Shutdown waits for usage records being handled before the final ledger save.
+- The usage page runs one inline script under a per-response CSP nonce and fetches `usage.json` from its own origin (`connect-src 'self'`); it still has no `frame-ancestors`, so cross-origin Management Center frames keep working.
+
+## [0.5.0] - 2026-10-23
+
+### Added
+
+- `providers.synthetic`: a synthetic.new provider module. It manages a paid provider (default `synthetic`) and an infinite-mode provider (default `synthetic-infinite`, the Big plan's free `infinite:small:vision` alias) that share one API key. New requests stay on the paid credential while the plan's weekly credits are under `threshold-percent` (default 95) used and move to infinite mode for aliases both providers serve once the plan is at the threshold, exhausted (429/402), or at `max-concurrent`. Paid-only models are rejected with a retryable HTTP 429 `synthetic_no_capacity` instead of spilling into usage-based billing. A paid credential seen at runtime but absent from the last reconfigure is bound to its provider's account when there is exactly one; one that cannot be bound (two or more accounts, or none) is never admitted, because its spend cannot be checked against a weekly limit, and shows as `unbound`. Quota comes from the free `GET /v2/quotas` endpoint (never polled with placeholder keys) and the `x-synthetic-quotas` response header, projected forward through the documented 2%-per-202-minutes regeneration. Status reports per-lane health, projected weekly usage, in-flight counts, routing counters and measured output tokens per second and time to first token for paid versus infinite mode. The Subscription Quota page shows synthetic.new lanes.
+- The coordinator dispatches usage for auth IDs no module owns to the single module that claims it through the new optional `providermodule.UsageRecognizer`.
+- The plugin advertises `scheduler_across_priorities` so CLIProxyAPI v8 hosts offer lower-priority fallback credentials to the scheduler. Unrecognized picks still return `Handled:false` and keep the host's priority order.
+
+### Changed
+
+- The repository and Go module are renamed from `cpa-plugin-zai-coding-plan` to `cpa-plugin-subscription-pool` (the plugin ID was already `subscription-pool`). GitHub redirects the old repository, git and release URLs.
+
+### Fixed
+
+- A host config without any Z.ai credential no longer fails the whole plugin with `provider zai: no complete Z.ai account pairs found`. The zai module is inactive in that case, so the other provider modules register and schedule. A partial or malformed Z.ai configuration still fails closed, and so does a `providers.zai.accounts` override with no Z.ai credential in the host config (`accounts[0]: key-suffix matches no account`, the same error an unmatched override gets when credentials exist); remove the override when the Z.ai plan is gone.
+- An OpenCode Go module with `enabled: false` or no accounts no longer claims OpenCode Go candidates. Before, `Recognize` still claimed them and `Pick` then failed every OpenCode Go request with `opencode_go_unmanaged_candidate`.
 
 - Deployment verification accepts in-process secret intake and the snapshot service's own feed envelope: `deploy/verify-live.sh`, `deploy/verify-live-opencodego.sh`, and `deploy/rollback.sh` take `CLIPROXY_MANAGEMENT_KEY` / `ZAI_CODING_PLAN_KEY` / `OPENCODE_GO_DASHBOARD_API_KEY` from the environment (sourced in-process from the established credential file, never a new file on disk) as an alternative to 0600 key files, with identical one-line/UTF-8 validation and unchanged confidential-value scans. In snapshot-only mode the feed check accepts the existing `{observedAt, records, schemaVersion, staleAfterSeconds}` envelope (records only need to be non-empty objects) while collector-written feeds keep the strict shape checks; the Go `credential_bound` agreement applies to collector feeds only. The runbook no longer extracts keys into temp files, references no absent key paths, and parameterizes the config ownership it verifies (current host `1000:1000`) instead of asserting `root:root`.
 - Deployment verification now accepts the v0.4.5 status shape: `collector-zai.py` and `deploy/verify-live.sh` validate the per-account `identity` pseudonym (64 lowercase hex, unique, confidential-value scanned) and the `cooldown` object (closed reason vocabulary, exact source, active/inactive consistency) from `docs/STATUS-CONTRACT.md`, plus the optional `five_hour_error` diagnostic. Previously both scripts rejected live v0.4.5 status with `secret-like field is forbidden: status.accounts[0].identity` / `unexpected fields`, so no published script could complete acceptance after the v0.4.5 install.
@@ -109,13 +161,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Raw plan keys, authorization headers, request bodies, and management credentials are excluded from persistent state, logs, and status responses; persistence uses only derived account identities and redacted state.
 - State and settings commits are atomic, redacted, and recovered fail-closed after interrupted writes.
 
-[Unreleased]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/compare/v0.4.5...HEAD
-[0.4.5]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.4.5
-[0.4.4]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.4.4
-[0.4.3]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.4.3
-[0.4.2]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.4.2
-[0.4.1]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.4.1
-[0.4.0]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.4.0
-[0.3.0]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.3.0
-[0.2.0]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.2.0
-[0.1.0]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.1.0
+[Unreleased]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/releases/tag/v0.7.0
+[0.6.1]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/releases/tag/v0.6.1
+[0.6.0]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/releases/tag/v0.6.0
+[0.5.0]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/releases/tag/v0.5.0
+[0.4.5]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/releases/tag/v0.4.5
+[0.4.4]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/releases/tag/v0.4.4
+[0.4.3]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/releases/tag/v0.4.3
+[0.4.2]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/releases/tag/v0.4.2
+[0.4.1]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/releases/tag/v0.4.1
+[0.4.0]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/releases/tag/v0.4.0
+[0.3.0]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/releases/tag/v0.3.0
+[0.2.0]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/releases/tag/v0.2.0
+[0.1.0]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/releases/tag/v0.1.0

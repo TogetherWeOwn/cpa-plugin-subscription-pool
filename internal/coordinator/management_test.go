@@ -8,7 +8,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 
-	"github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/internal/providermodule"
+	"github.com/TogetherWeOwn/cpa-plugin-subscription-pool/internal/providermodule"
 )
 
 // fakeManagementModule is a fakeModule that also implements
@@ -45,8 +45,8 @@ func TestManagementRoutesAggregatesCoordinatorAndModuleRoutes(t *testing.T) {
 
 	body := c.managementRoutes()
 
-	if len(body.Routes) != 2 {
-		t.Fatalf("Routes = %#v, want coordinator's own status route + alpha's route (2 total)", body.Routes)
+	if len(body.Routes) != 3 {
+		t.Fatalf("Routes = %#v, want coordinator's own status and usage routes + alpha's route (3 total)", body.Routes)
 	}
 	foundOwn := false
 	foundAlpha := false
@@ -61,8 +61,8 @@ func TestManagementRoutesAggregatesCoordinatorAndModuleRoutes(t *testing.T) {
 	if !foundOwn || !foundAlpha {
 		t.Fatalf("Routes = %#v, missing expected entries", body.Routes)
 	}
-	if len(body.Resources) != 2 {
-		t.Fatalf("Resources = %#v, want coordinator's own resource + alpha's resource (2 total)", body.Resources)
+	if len(body.Resources) != 3 {
+		t.Fatalf("Resources = %#v, want coordinator's own page and data resources + alpha's resource (3 total)", body.Resources)
 	}
 	foundOwnResource := false
 	foundAlphaResource := false
@@ -145,10 +145,10 @@ func TestHandleManagementUnknownRouteAnswers404(t *testing.T) {
 func TestManagementRoutesSkipsModulesWithoutManagementCapable(t *testing.T) {
 	c := New(&fakeModule{id: "alpha"})
 	body := c.managementRoutes()
-	if len(body.Routes) != 1 || body.Routes[0].Path != managementStatusPath {
-		t.Fatalf("Routes = %#v, want only the coordinator's own status route", body.Routes)
+	if len(body.Routes) != 2 || body.Routes[0].Path != managementStatusPath || body.Routes[1].Path != managementUsagePath {
+		t.Fatalf("Routes = %#v, want only the coordinator's own status and usage routes", body.Routes)
 	}
-	if len(body.Resources) != 1 || body.Resources[0].Path != resourceStatusPath {
-		t.Fatalf("Resources = %#v, want only the coordinator's own resource", body.Resources)
+	if len(body.Resources) != 2 || body.Resources[0].Path != resourceStatusPath || body.Resources[1].Path != resourceUsageDataPath {
+		t.Fatalf("Resources = %#v, want only the coordinator's own page and data resources", body.Resources)
 	}
 }

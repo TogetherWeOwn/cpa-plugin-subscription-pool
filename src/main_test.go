@@ -1,18 +1,21 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"encoding/xml"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 
-	"github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/internal/coordinator"
-	"github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/internal/providers/opencodego"
-	"github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/internal/providers/zai"
+	"github.com/TogetherWeOwn/cpa-plugin-subscription-pool/internal/coordinator"
+	"github.com/TogetherWeOwn/cpa-plugin-subscription-pool/internal/providers/opencodego"
+	"github.com/TogetherWeOwn/cpa-plugin-subscription-pool/internal/providers/zai"
 )
 
 // writeSrcCPAConfigFixture writes a host CLIProxyAPI config in the
@@ -47,14 +50,49 @@ func TestPluginRegistration(t *testing.T) {
 	if registration.SchemaVersion != pluginabi.SchemaVersion {
 		t.Fatalf("schema version = %d, want %d", registration.SchemaVersion, pluginabi.SchemaVersion)
 	}
-	if registration.Metadata.Name != pluginID {
-		t.Fatalf("plugin name = %q, want %q", registration.Metadata.Name, pluginID)
+	const wantName = "Subscription Pool: Z.ai · OpenCode Go · synthetic.new"
+	if registration.Metadata.Name != wantName {
+		t.Fatalf("plugin name = %q, want %q", registration.Metadata.Name, wantName)
 	}
 	// The pinned host rejects plugins that advertise no capability
 	// (internal/pluginhost host.go validPlugin). Every advertised
 	// capability must also have a handler in pluginCall.
-	if registration.Capabilities != (capabilities{Scheduler: true, UsagePlugin: true, ManagementAPI: true}) {
-		t.Fatalf("capabilities = %#v, want scheduler, usage_plugin, and management_api", registration.Capabilities)
+	if registration.Capabilities != (capabilities{Scheduler: true, SchedulerAcrossPriorities: true, UsagePlugin: true, ManagementAPI: true}) {
+		t.Fatalf("capabilities = %#v, want scheduler (across priorities), usage_plugin, and management_api", registration.Capabilities)
+	}
+}
+
+func TestPluginBrandingMetadata(t *testing.T) {
+	metadata := pluginRegistration().Metadata
+	if pluginID != "subscription-pool" {
+		t.Fatal("branding must not change the stable host/config ID")
+	}
+	if metadata.Author != "TogetherWeOwn" || metadata.GitHubRepository != "https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool" {
+		t.Fatalf("source metadata = %#v", metadata)
+	}
+	const prefix = "data:image/svg+xml;base64,"
+	if !strings.HasPrefix(metadata.Logo, prefix) {
+		t.Fatalf("logo must be self-contained SVG, got %q", metadata.Logo)
+	}
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(metadata.Logo, prefix))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var svg struct {
+		XMLName xml.Name
+		ViewBox string `xml:"viewBox,attr"`
+		Title   string `xml:"title"`
+	}
+	if err := xml.Unmarshal(raw, &svg); err != nil {
+		t.Fatal(err)
+	}
+	if svg.XMLName.Local != "svg" || svg.ViewBox != "0 0 64 64" || svg.Title != "Subscription Pool" {
+		t.Fatalf("logo is missing accessible SVG identity: %#v", svg)
+	}
+	for _, unsafe := range []string{"<script", "href=", "onload=", "<foreignObject"} {
+		if strings.Contains(string(raw), unsafe) {
+			t.Fatalf("logo contains active or external content: %q", unsafe)
+		}
 	}
 }
 
@@ -192,14 +230,18 @@ func TestManagementRegistrationRoutes(t *testing.T) {
 	if err := json.Unmarshal(envelope.Result, &routes); err != nil {
 		t.Fatal(err)
 	}
-	// The coordinator's own aggregated status route, plus the zai module's 4
-	// declared routes (status/refresh/unblock/account-config) = 5 total.
-	if len(routes.Routes) != 5 {
-		t.Fatalf("routes = %#v, want 5 routes (coordinator status + zai's 4)", routes.Routes)
+	// The coordinator's own aggregated status and usage routes, plus the zai
+	// module's 4 declared routes (status/refresh/unblock/account-config) = 6.
+	if len(routes.Routes) != 6 {
+		t.Fatalf("routes = %#v, want 6 routes (coordinator status + usage + zai's 4)", routes.Routes)
 	}
 	wantStatusPath := "/v0/management/plugins/" + pluginID + "/status"
 	if route := routes.Routes[0]; route.Method != "GET" || route.Path != wantStatusPath {
 		t.Fatalf("route = %#v, want GET %s", route, wantStatusPath)
+	}
+	wantUsagePath := "/v0/management/plugins/" + pluginID + "/usage"
+	if route := routes.Routes[1]; route.Method != "GET" || route.Path != wantUsagePath {
+		t.Fatalf("route = %#v, want GET %s", route, wantUsagePath)
 	}
 }
 

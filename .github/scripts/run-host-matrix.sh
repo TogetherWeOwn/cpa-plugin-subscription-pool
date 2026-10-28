@@ -50,7 +50,7 @@ run_one() {
   "${prefix[@]}" bash -euo pipefail -c '
     busybox ip link set lo up
     hosts=$(mktemp)
-    printf "127.0.0.1 api.z.ai\n::1 localhost\n" > "$hosts"
+    printf "127.0.0.1 api.z.ai api.cloudflare.com integrate.api.nvidia.com\n::1 localhost\n" > "$hosts"
     mount --bind "$hosts" /etc/hosts
     exec "$@"
   ' bash "$root/.github/scripts/host-integration/host-integration" \

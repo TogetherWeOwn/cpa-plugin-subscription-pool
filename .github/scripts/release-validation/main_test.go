@@ -486,7 +486,7 @@ func writeDocumentation(t *testing.T, root string) {
 	if err := os.WriteFile(filepath.Join(root, "NOTICE"), []byte(canonicalNotice), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	changelog := "## [0.2.0] - 2026-09-08\n\n[0.2.0]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.2.0\n"
+	changelog := "## [0.2.0] - 2026-09-08\n\n[0.2.0]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/releases/tag/v0.2.0\n"
 	if err := os.WriteFile(filepath.Join(root, "CHANGELOG.md"), []byte(changelog), 0o644); err != nil {
 		t.Fatal(err)
 	}

@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
+  <title id="title">Subscription Pool</title>
+  <rect width="64" height="64" rx="16" fill="#172554"/>
+  <g fill="none" stroke-width="5" stroke-linecap="round">
+    <path d="M32 17c-11 0-19 6-19 15s8 15 19 15" stroke="#67e8f9"/>
+    <path d="M22 20c-5 10-3 20 5 25s17 1 22-9" stroke="#c4b5fd"/>
+    <path d="M43 23c-6-9-15-13-23-8s-9 15-3 24" stroke="#fcd34d"/>
+  </g>
+  <circle cx="32" cy="32" r="4" fill="#ffffff"/>
+</svg>

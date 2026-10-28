@@ -8,7 +8,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 
-	"github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/internal/providermodule"
+	"github.com/TogetherWeOwn/cpa-plugin-subscription-pool/internal/providermodule"
 )
 
 // fakeModule is a table-configurable providermodule.Module for exercising
@@ -184,3 +184,40 @@ var errAllImpaired = fakeSchedulerError("all_impaired")
 type fakeSchedulerError string
 
 func (e fakeSchedulerError) Error() string { return string(e) }
+
+// recognizingFakeModule adds the optional UsageRecognizer to fakeModule.
+type recognizingFakeModule struct {
+	fakeModule
+	claims func(pluginapi.UsageRecord) bool
+}
+
+func (m *recognizingFakeModule) RecognizeUsage(record pluginapi.UsageRecord) bool {
+	return m.claims != nil && m.claims(record)
+}
+
+// The registry still wins; the UsageRecognizer fallback only applies to
+// auth IDs no module owns, and only when exactly one module claims them.
+func TestCoordinatorHandleUsageFallsBackToSingleUsageRecognizer(t *testing.T) {
+	alpha := &fakeModule{id: "alpha"}
+	beta := &recognizingFakeModule{fakeModule: fakeModule{id: "beta"}, claims: func(r pluginapi.UsageRecord) bool { return r.Provider == "beta" }}
+	c := New(alpha, beta)
+	c.registry.swap(map[string]registryEntry{"alpha-1": {providerID: "alpha"}})
+
+	_ = c.handleUsage(pluginapi.UsageRecord{AuthID: "alpha-1", Provider: "beta"})
+	_ = c.handleUsage(pluginapi.UsageRecord{AuthID: "rekeyed", Provider: "beta"})
+	_ = c.handleUsage(pluginapi.UsageRecord{AuthID: "other", Provider: "gamma"})
+	if len(alpha.usageCalls) != 1 || len(beta.usageCalls) != 1 || beta.usageCalls[0].AuthID != "rekeyed" {
+		t.Fatalf("alpha calls = %d, beta calls = %v", len(alpha.usageCalls), beta.usageCalls)
+	}
+}
+
+func TestCoordinatorHandleUsageAmbiguousRecognizersIsNoop(t *testing.T) {
+	claimAll := func(pluginapi.UsageRecord) bool { return true }
+	alpha := &recognizingFakeModule{fakeModule: fakeModule{id: "alpha"}, claims: claimAll}
+	beta := &recognizingFakeModule{fakeModule: fakeModule{id: "beta"}, claims: claimAll}
+	c := New(alpha, beta)
+	_ = c.handleUsage(pluginapi.UsageRecord{AuthID: "unknown"})
+	if len(alpha.usageCalls) != 0 || len(beta.usageCalls) != 0 {
+		t.Fatalf("ambiguous usage dispatched: alpha %d beta %d", len(alpha.usageCalls), len(beta.usageCalls))
+	}
+}

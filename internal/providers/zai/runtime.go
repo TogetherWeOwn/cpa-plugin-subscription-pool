@@ -216,6 +216,22 @@ func (r *pluginRuntime) current() (*runtimeSnapshot, error) {
 	return cloneRuntimeSnapshot(r.snapshot), nil
 }
 
+// accountNameForAuthID returns the display name of the account owning
+// authID, or "". It reads the live snapshot under the read lock without
+// cloning it, because it runs once per usage record.
+func (r *pluginRuntime) accountNameForAuthID(authID string) string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.snapshot == nil {
+		return ""
+	}
+	identity := r.snapshot.byAuthID[strings.TrimSpace(authID)]
+	if identity == "" {
+		return ""
+	}
+	return r.snapshot.byIdentity[identity].Name
+}
+
 func sameSecureStore(left, right *secureStore) bool {
 	return left != nil && right != nil && left.dir == right.dir
 }

@@ -5,7 +5,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 
-	"github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/internal/providermodule"
+	"github.com/TogetherWeOwn/cpa-plugin-subscription-pool/internal/providermodule"
 )
 
 var _ providermodule.Module = (*zaiModule)(nil)
@@ -39,5 +39,21 @@ func TestRecognizeManagedAccountByBareAuthID(t *testing.T) {
 
 	if module.Recognize(pluginapi.SchedulerAuthCandidate{ID: "unmanaged-auth-id"}) {
 		t.Fatal("Recognize() = true for an auth ID absent from the snapshot")
+	}
+}
+
+func TestUsageAccountNamesTheOwningAccount(t *testing.T) {
+	account := schedulerAccount("one", "claude-one", "openai-one")
+	module := &zaiModule{runtime: schedulerTestRuntime(schedulerNow, account)}
+	for _, authID := range []string{account.ClaudeAuthID, account.OpenAIAuthID} {
+		if got := module.UsageAccount(pluginapi.UsageRecord{AuthID: authID}); got != account.Name {
+			t.Fatalf("UsageAccount(%q) = %q, want %q", authID, got, account.Name)
+		}
+	}
+	if got := module.UsageAccount(pluginapi.UsageRecord{AuthID: "unmanaged"}); got != "" {
+		t.Fatalf("UsageAccount(unmanaged) = %q, want empty", got)
+	}
+	if got := (&zaiModule{runtime: &pluginRuntime{}}).UsageAccount(pluginapi.UsageRecord{AuthID: account.OpenAIAuthID}); got != "" {
+		t.Fatalf("UsageAccount on an unconfigured runtime = %q, want empty", got)
 	}
 }

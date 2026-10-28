@@ -54,7 +54,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 `
 
-const canonicalNotice = `cpa-plugin-zai-coding-plan
+const canonicalNotice = `cpa-plugin-subscription-pool
 Copyright (c) 2026 TogetherWeOwn
 
 This product includes software developed by TogetherWeOwn and third-party software whose licenses are recorded in the Go module dependency metadata.
@@ -274,7 +274,7 @@ func validateChangelog(root, version string) error {
 	if !headingPattern.MatchString(text) {
 		return fmt.Errorf("changelog must contain a dated [%s] release heading", version)
 	}
-	link := fmt.Sprintf("[%s]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v%s", version, version)
+	link := fmt.Sprintf("[%s]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/releases/tag/v%s", version, version)
 	if !strings.Contains(text, link) {
 		return fmt.Errorf("changelog is missing the %s release link", version)
 	}
