@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -59,6 +59,10 @@ func doJSON(ctx context.Context, client providermodule.HTTPDoer, method, target,
 	return data, res.StatusCode, nil
 }
 
+// Match a decimal zero exactly instead of rounding through float64: a tiny
+// nonzero price such as 1e-9999 must not underflow into a free-model admission.
+var zeroPrice = regexp.MustCompile(`^[+-]?(?:0+(?:\.0*)?|\.0+)(?:[eE][+-]?[0-9]+)?$`)
+
 // isFreeModel is deliberately stricter than "prompt and completion are 0":
 // every price OpenRouter lists for the model must parse and be zero, and the
 // id must carry the :free suffix. Anything unparseable is not free.
@@ -74,14 +78,9 @@ func isFreeModel(id string, pricing map[string]json.RawMessage) bool {
 	for _, raw := range pricing {
 		var s string
 		if json.Unmarshal(raw, &s) != nil {
-			var n float64
-			if json.Unmarshal(raw, &n) != nil || n != 0 {
-				return false
-			}
-			continue
+			s = string(raw)
 		}
-		v, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
-		if err != nil || v != 0 {
+		if !zeroPrice.MatchString(strings.TrimSpace(s)) {
 			return false
 		}
 	}

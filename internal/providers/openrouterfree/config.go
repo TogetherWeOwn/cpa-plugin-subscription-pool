@@ -2,7 +2,7 @@
 // provider on exactly OpenRouter's current free models, and never admits a
 // request for anything else. OpenRouter publishes the free list (`:free` ids
 // with zero prices) in its public catalog and the daily free-request limit
-// (50, or 1000 once credits were purchased) on GET /api/v1/key.
+// (50, or normally 1000 after at least $10 in credit purchases) on GET /api/v1/key.
 package openrouterfree
 
 import (

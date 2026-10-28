@@ -208,7 +208,7 @@ func (m *Module) reconcile(ctx context.Context, client providermodule.HTTPDoer, 
 	switch {
 	case err != nil:
 		return "management_" + err.Error()
-	case status == http.StatusOK || status == http.StatusNoContent:
+	case status >= http.StatusOK && status < http.StatusMultipleChoices:
 		return reconcileSynced
 	default:
 		return "management_http_" + strconv.Itoa(status)

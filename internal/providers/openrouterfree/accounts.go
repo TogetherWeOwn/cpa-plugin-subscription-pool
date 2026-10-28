@@ -60,7 +60,11 @@ func discover(host providermodule.HostConfig) hostView {
 			if len(compat.APIKeyEntries) == 0 {
 				parts = []string{compat.BaseURL}
 			}
-			h := sha256.New() // codeql[go/weak-sensitive-data-hashing] Upstream non-security ID contract.
+			// CLIProxyAPI v7.2.154 internal/watcher/synthesizer/helpers.go
+			// uses this digest as a routing label, not a password verifier.
+			// Keep the ID in memory and on the internal scheduler boundary;
+			// status, logs and durable allowance state must never contain it.
+			h := sha256.New()
 			h.Write([]byte(kind))
 			for _, p := range parts {
 				h.Write([]byte{0})
@@ -75,7 +79,7 @@ func discover(host providermodule.HostConfig) hostView {
 			ordinal++
 			key := strings.TrimSpace(entry.APIKey)
 			bound := key != "" && !strings.ContainsAny(key, "<>${} \r\n\t") && !strings.Contains(strings.ToLower(key), "placeholder")
-			if bound && view.apiKey == "" {
+			if bound && isFreeEndpoint(compat.BaseURL) && view.apiKey == "" {
 				view.apiKey = key
 			}
 			view.lanes[id] = lane{name: fmt.Sprintf("openrouter-free#%d", ordinal), bound: bound, freeEndpoint: isFreeEndpoint(compat.BaseURL), routes: routes}
