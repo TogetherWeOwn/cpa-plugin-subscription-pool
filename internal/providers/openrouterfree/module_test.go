@@ -48,6 +48,7 @@ type fakeHTTP struct {
 	catCode  int
 	freeTier bool
 	keyCode  int
+	keyBody  string
 	patchOK  int
 	calls    []call
 	patched  chan struct{}
@@ -70,7 +71,10 @@ func (f *fakeHTTP) Do(req *http.Request) (*http.Response, error) {
 	case req.URL.String() == catalogURL:
 		code, out = f.catCode, f.catalog
 	case req.URL.String() == keyURL:
-		code, out = f.keyCode, `{"data":{"is_free_tier":`+map[bool]string{true: "true", false: "false"}[f.freeTier]+`}}`
+		code, out = f.keyCode, f.keyBody
+		if out == "" {
+			code, out = f.keyCode, `{"data":{"is_free_tier":`+map[bool]string{true: "true", false: "false"}[f.freeTier]+`,"free_model_daily_requests":{"limit":`+map[bool]string{true: "50", false: "1000"}[f.freeTier]+`}}}`
+		}
 	case req.Method == http.MethodPatch && strings.HasSuffix(req.URL.Path, "/v0/management/openai-compatibility"):
 		code, out = f.patchOK, `{"status":"ok"}`
 	}
@@ -621,4 +625,55 @@ func TestStaleCatalogRefusesEvenWithTheLocalLimitsOff(t *testing.T) {
 	assertPick(t, m, req(m, aliasPrefix+idA), true)
 	m.now = func() time.Time { return start.Add(25 * time.Hour) }
 	assertPick(t, m, req(m, aliasPrefix+idA), false)
+}
+
+func TestKeyDailyLimitUsesReportedCeiling(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		want       int64
+	}{
+		{"paid tier below threshold", `{"data":{"is_free_tier":false,"free_model_daily_requests":{"limit":50}}}`, 50},
+		{"reported higher limit", `{"data":{"is_free_tier":false,"free_model_daily_requests":{"limit":1000}}}`, 1000},
+		{"missing ceiling", `{"data":{"is_free_tier":false}}`, 50},
+		{"invalid ceiling", `{"data":{"is_free_tier":false,"free_model_daily_requests":{"limit":-1}}}`, 50},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFake(idA)
+			f.keyBody = tc.body
+			got, err := fetchDailyLimit(context.Background(), f, "test-key")
+			if err != nil || got != tc.want {
+				t.Fatalf("got %d, %v; want %d", got, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestReconcileAcceptsNoContent(t *testing.T) {
+	keyFile := filepath.Join(t.TempDir(), "mgmt.key")
+	if err := os.WriteFile(keyFile, []byte("test-only-management-key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f := newFake(idA)
+	f.patchOK = http.StatusNoContent
+	m := setup(t, hostWith(t, f, entry()), `{"management-key-file":"`+keyFile+`"}`)
+	syncNow(t, m)
+	if s := status(t, m); s.HostSync != reconcileSynced || s.HostSyncedAt == nil {
+		t.Fatalf("status: %+v", s)
+	}
+}
+
+func TestUnavailableKeyLimitFallsBackAfterPreviouslyHigherLimit(t *testing.T) {
+	f := newFake(idA)
+	m := setup(t, hostWith(t, f, entry(idA)), `{}`)
+	syncNow(t, m)
+	if s := status(t, m); s.DailyLimit != 1000 {
+		t.Fatalf("initial limit = %d, want 1000", s.DailyLimit)
+	}
+	f.mu.Lock()
+	f.keyCode = http.StatusInternalServerError
+	f.mu.Unlock()
+	syncNow(t, m)
+	if s := status(t, m); s.DailyLimit != 50 || s.DailyLimitSource != "assumed_lowest" {
+		t.Fatalf("status after key endpoint failure: %+v", s)
+	}
 }

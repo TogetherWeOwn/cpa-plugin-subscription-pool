@@ -87,8 +87,14 @@ func (m *Module) syncOnce(ctx context.Context) {
 	}
 	if limitErr == nil {
 		m.state.DailyLimit, m.state.LimitAt = limit, now
-	} else if m.sync.LastError == "" {
-		m.sync.LastError = limitErr.Error()
+	} else {
+		// An old elevated ceiling is not safe when the current key limit is unknown.
+		if m.state.DailyLimit > lowestDailyLimit {
+			m.state.DailyLimit, m.state.LimitAt = 0, time.Time{}
+		}
+		if m.sync.LastError == "" {
+			m.sync.LastError = limitErr.Error()
+		}
 	}
 	_ = m.save() // a failed write latches state_unavailable and blocks admission
 	cfg, view := m.cfg, m.view
@@ -202,7 +208,7 @@ func (m *Module) reconcile(ctx context.Context, client providermodule.HTTPDoer, 
 	switch {
 	case err != nil:
 		return "management_" + err.Error()
-	case status == http.StatusOK:
+	case status == http.StatusOK || status == http.StatusNoContent:
 		return reconcileSynced
 	default:
 		return "management_http_" + strconv.Itoa(status)

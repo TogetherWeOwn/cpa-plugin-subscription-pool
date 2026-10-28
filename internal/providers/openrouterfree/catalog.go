@@ -152,8 +152,8 @@ func textOutput(arch *struct {
 	return false
 }
 
-// fetchDailyLimit maps the key's tier to OpenRouter's documented free-model
-// daily allowance: 50 without purchased credits, 1000 with.
+// fetchDailyLimit uses the reported free-model ceiling, defaulting to the
+// conservative lowest allowance when the field is absent or invalid.
 func fetchDailyLimit(ctx context.Context, client providermodule.HTTPDoer, apiKey string) (int64, error) {
 	body, status, err := doJSON(ctx, client, http.MethodGet, keyURL, apiKey, nil)
 	if err != nil {
@@ -164,14 +164,16 @@ func fetchDailyLimit(ctx context.Context, client providermodule.HTTPDoer, apiKey
 	}
 	var envelope struct {
 		Data *struct {
-			IsFreeTier *bool `json:"is_free_tier"`
+			FreeModelDailyRequests *struct {
+				Limit *int64 `json:"limit"`
+			} `json:"free_model_daily_requests"`
 		} `json:"data"`
 	}
-	if json.Unmarshal(body, &envelope) != nil || envelope.Data == nil || envelope.Data.IsFreeTier == nil {
+	if json.Unmarshal(body, &envelope) != nil || envelope.Data == nil {
 		return 0, fmt.Errorf("key_malformed")
 	}
-	if *envelope.Data.IsFreeTier {
-		return 50, nil
+	if f := envelope.Data.FreeModelDailyRequests; f != nil && f.Limit != nil && *f.Limit > 0 && *f.Limit <= 1000 {
+		return *f.Limit, nil
 	}
-	return 1000, nil
+	return lowestDailyLimit, nil
 }
