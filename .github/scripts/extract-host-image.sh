@@ -9,20 +9,32 @@ die() {
   exit 1
 }
 
-# `@tsv` stringifies whatever the pin holds, so a boolean or null would become
-# the valid-looking name `false` or `null` and reach the registry. Require the
-# JSON types first, then convert.
-bad_type=$(jq -r '
-  . as $pin
-  | ["repository", "manifest_digest", "platform"]
-  | map(select(($pin[.] | type) != "string"))
-  | first // empty
-' "$pin") || die 'cannot read the image pin JSON'
-[[ -z "$bad_type" ]] ||
-  die "image pin field $bad_type must be a JSON string"
+# A pin file holding two image objects used to pass both objects through jq,
+# which emitted two TSV rows, and the single `read` below then quietly took the
+# first: the extractor fetched an image the pin no longer named. The pin must
+# hold exactly one object, so a stream of values is rejected here instead of
+# being truncated to its first value.
+pin_error=$(jq -r '
+  if length != 1 then
+    "the image pin must hold exactly one image object"
+  elif (.[0] | type) != "object" then
+    "the image pin must hold an image object"
+  else
+    # `@tsv` stringifies whatever the pin holds, so a boolean or null would
+    # become the valid-looking name `false` or `null` and reach the registry.
+    .[0] as $image
+    | [["repository", "manifest_digest", "platform"][]
+       | select(($image[.] | type) != "string")]
+    | first // empty
+    | "image pin field \(.) must be a JSON string"
+  end
+' --slurp "$pin") || die 'cannot read the image pin JSON'
+[[ -z "$pin_error" ]] || die "$pin_error"
 
-fields=$(jq -er '[.repository, .manifest_digest, .platform] | @tsv' "$pin") ||
-  die 'cannot read the image pin JSON'
+fields=$(jq -er '
+  if length == 1 then .[0] else empty end
+  | [.repository, .manifest_digest, .platform] | @tsv
+' --slurp "$pin") || die 'cannot read the image pin JSON'
 IFS=$'\t' read -r repository digest platform <<<"$fields"
 
 # The pin is interpolated into registry URLs, so validate it against Docker's
