@@ -8,8 +8,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
-- Host image extraction retries a bounded three times on a transient transport failure (reset connection, stalled connect, empty reply) at the token, manifest and layer stages instead of failing on the first `curl: (35) Recv failure: Connection reset by peer`. Retries use a short backoff between attempts. HTTP errors, digest mismatches, a non-linux/amd64 pin and a missing host binary still fail immediately, before any host is executed.
-- Extraction failures now name the phase, repository and curl exit code on stderr, while stdout still carries only the extracted host path. Bearer tokens and request headers are never printed.
+- Host image extraction retries a transient transport failure (reset connection, stalled connect, empty reply, partial transfer, resolver hiccup) at the token, manifest and layer stages instead of failing on the first `curl: (35) Recv failure: Connection reset by peer`. Each request gets at most three attempts with a short backoff. HTTP errors, digest mismatches, a non-linux/amd64 pin, an unreadable layer archive and a missing host binary still fail immediately, before any host is executed.
+- Each attempt downloads into its own scratch file and replaces the destination only on success, so a partial response body can never be joined to the next attempt's body and a corrupt token or manifest can no longer survive a successful retry.
+- Extraction failures now identify what failed on stderr: a fetch failure names the phase, repository, curl exit code and attempt count, and the digest, platform, archive and host checks name what they rejected. Stdout still carries only the extracted host path, and bearer tokens and request headers are never printed.
 - `.github/scripts/extract-host-image_test.sh` exercises this offline with a fake `curl`; `make test-host-extract` runs it in the CI `quality` job.
 
 ## [0.7.0] - 2026-10-24
