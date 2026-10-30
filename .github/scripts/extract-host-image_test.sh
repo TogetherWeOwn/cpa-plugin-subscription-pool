@@ -135,6 +135,7 @@ case "$url" in
     fixture="$fixture_dir/layer.tar.gz"
     ;;
   *)
+    printf 'unsupported curl URL\n' >>"$state_dir/contract-errors"
     printf 'curl: (6) fake curl: unsupported URL\n' >&2
     exit 6
     ;;
@@ -600,12 +601,16 @@ done
 
 # Hash each malformed manifest and pin those exact bytes, so a digest mismatch
 # cannot mask the intended layer-list/digest rejection. No blob may be fetched.
+# Newlines stay inside ONE JSON descriptor. Both segments use the real fixture
+# digest, so splitting it into records cannot fail just on an unknown blob URL
+# or a mismatched blob checksum; the whole value must be rejected before fetch.
 while IFS='|' read -r kind update diagnostic; do
   fixture="$work/fixtures-layers-$kind"
   mkdir -p "$fixture" || fatal 'cannot create rejected-manifest fixture'
   cp "$base_fixture/token.json" "$base_fixture/layer.tar.gz" "$fixture/" ||
     fatal 'cannot copy rejected-manifest fixtures'
-  jq "$update" "$base_fixture/manifest.json" >"$fixture/manifest.json" ||
+  jq --arg digest "sha256:$layer_digest_hex" "$update" \
+    "$base_fixture/manifest.json" >"$fixture/manifest.json" ||
     fatal 'cannot write rejected manifest'
   digest=$(sha256sum "$fixture/manifest.json" | cut -d' ' -f1)
   pin="$work/pin-layers-$kind.json"
@@ -619,6 +624,8 @@ empty-layers|.layers = []|declares no layers
 malformed-layer-list|.layers = {}|
 invalid-layer-digest|.layers[0].digest = "not-a-sha256-digest"|
 null-layer-digest|.layers[0].digest = null|
+embedded-newline-layer-digest|.layers[0].digest = ($digest + "\n" + $digest)|
+trailing-newline-layer-digest|.layers[0].digest = ($digest + "\n")|
 LAYER_CASES
 
 # Invalid pin types and repository grammar must fail before networking, not
