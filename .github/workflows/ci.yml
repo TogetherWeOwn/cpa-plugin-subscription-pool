@@ -110,6 +110,10 @@ jobs:
         run: go test -race ./...
       - name: Test release validation
         run: make test-release
+      # Offline fake-curl tests for the host image extractor: phase resets,
+      # bounded retries, diagnostics and the fail-closed digest/platform gates.
+      - name: Test host image extraction
+        run: make test-host-extract
       - name: Validate release source
         run: make validate-source
       - name: Lint
