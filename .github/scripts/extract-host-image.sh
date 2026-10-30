@@ -41,8 +41,8 @@ repository_component='[a-z0-9]+((\.|_|__|-+)[a-z0-9]+)*'
 mkdir -p "$out/rootfs" || die "cannot create the output directory $out/rootfs"
 
 # A single transient transport failure used to abort the whole compatibility
-# matrix: `curl: (35) Recv failure: Connection reset by peer` on the token
-# request failed run-host-matrix.sh and `ci-ok` with it. Retry only transport
+# matrix: `curl: (35) Recv failure: Connection reset by peer` during an image
+# fetch failed run-host-matrix.sh and `ci-ok` with it. Retry only transport
 # failures, a bounded number of times; HTTP errors, digest mismatches and every
 # other failure still stop at once.
 max_attempts=3
@@ -153,17 +153,18 @@ resolved=$(sha256sum "$manifest" | cut -d' ' -f1) ||
 [[ "sha256:${resolved}" == "$digest" ]] ||
   die "manifest digest mismatch for $repository: pinned $digest, served sha256:$resolved"
 
-# Read the digests from a file, not `$(...)`: command substitution strips
-# trailing newlines, which would silently drop a trailing empty digest and
-# skip validating it.
-# `jq -e` exits 4 when the filter yields nothing, so an empty `.layers` array
-# would stop here with the generic message and the "declares no layers" gate
-# below would be unreachable. Without `-e`, a missing or non-array `.layers`
-# still fails the assignment (null iterates to nothing, and a jq error still
-# exits non-zero), while an empty array now falls through to the real gate.
+# Validate whole JSON strings before raw output can split embedded newlines
+# into otherwise valid digest records. The file is consumed only after jq
+# succeeds, so an invalid descriptor stops every blob fetch.
+# Do not use `jq -e`: an empty array must reach the "declares no layers" gate.
 digests="$out/layer-digests.txt"
-jq -r 'if (.layers | type) == "array" then .layers[].digest else error("layers is not an array") end' \
-  "$manifest" >"$digests" ||
+jq -r '
+  if (.layers | type) == "array" then
+    .layers[].digest |
+    if type == "string" and test("\\Asha256:[0-9a-f]{64}\\z") then .
+    else error("invalid layer digest") end
+  else error("layers is not an array") end
+' "$manifest" >"$digests" ||
   die "manifest for $repository has no readable layer list"
 
 index=0
