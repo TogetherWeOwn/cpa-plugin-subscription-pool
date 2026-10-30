@@ -4,7 +4,8 @@
 # A fake `curl` is put first on PATH. It serves fixed token, manifest and
 # layer fixtures and injects configurable transport/HTTP errors at one phase,
 # either before the response or after writing an incomplete body prefix.
-# No network, registry or host binary is used. Backoff sleeps are elided.
+# No external registry or real host is used. Sleep calls are recorded without
+# waiting; companion HTTP cases use real curl against loopback fixtures only.
 #
 # The fake counts requests, including curl-internal retries. Plain `--retry`
 # retries timeout error 28, but not error 35; `--retry-all-errors` retries
@@ -31,14 +32,17 @@ timeout_seconds=10
 
 pass_count=0
 fail_count=0
+case_names=()
 
 pass() {
   printf 'PASS: %s\n' "$1"
+  case_names+=("$1")
   pass_count=$((pass_count + 1))
 }
 
 fail() {
   printf 'FAIL: %s: %s\n' "$1" "$2"
+  case_names+=("$1")
   fail_count=$((fail_count + 1))
 }
 
@@ -47,7 +51,7 @@ fatal() {
   exit 2
 }
 
-for tool in jq sha256sum tar timeout; do
+for tool in jq sha256sum tar timeout python3 curl; do
   command -v "$tool" >/dev/null 2>&1 || fatal "required tool not found: $tool"
 done
 [[ -x "$extractor" ]] || fatal "extractor is not executable: $extractor"
@@ -68,6 +72,8 @@ fail_times=${FAKE_CURL_FAIL_TIMES:-0}
 fail_code=${FAKE_CURL_FAIL_EXIT_CODE:-35}
 partial_body=${FAKE_CURL_PARTIAL_BODY:-0}
 expected_token=${FAKE_CURL_EXPECTED_TOKEN:?FAKE_CURL_EXPECTED_TOKEN is required}
+expected_repository=${FAKE_CURL_EXPECTED_REPOSITORY:?FAKE_CURL_EXPECTED_REPOSITORY is required}
+expected_manifest=${FAKE_CURL_EXPECTED_MANIFEST:?FAKE_CURL_EXPECTED_MANIFEST is required}
 mkdir -p "$state_dir"
 
 url=''
@@ -124,15 +130,26 @@ esac
 case "$url" in
   *auth.docker.io/token*)
     phase=token
+    request_key=token
+    expected_url="https://auth.docker.io/token?service=registry.docker.io&scope=repository:${expected_repository}:pull"
     fixture="$fixture_dir/token.json"
     ;;
   */manifests/*)
     phase=manifest
+    request_key=manifest
+    expected_url="https://registry-1.docker.io/v2/${expected_repository}/manifests/${expected_manifest}"
     fixture="$fixture_dir/manifest.json"
     ;;
   */blobs/*)
     phase=blob
-    fixture="$fixture_dir/layer.tar.gz"
+    blob_digest=${url##*/}
+    request_key=invalid-blob
+    fixture=''
+    if [[ "$blob_digest" =~ ^sha256:([0-9a-f]{64})$ ]]; then
+      request_key="blob-${BASH_REMATCH[1]}"
+      fixture="$fixture_dir/blobs/$blob_digest"
+    fi
+    expected_url="https://registry-1.docker.io/v2/${expected_repository}/blobs/${blob_digest}"
     ;;
   *)
     printf 'unsupported curl URL\n' >>"$state_dir/contract-errors"
@@ -141,23 +158,38 @@ case "$url" in
     ;;
 esac
 
+# Optional per-request failures let independent manifest/blob budgets be
+# exercised together, including two distinct blob digests in one extraction.
+if [[ -f "$fixture_dir/failure-plan" ]]; then
+  fail_limit=0
+  fail_phase=none
+  while IFS='|' read -r key limit code partial; do
+    if [[ "$key" == "$request_key" ]]; then
+      fail_phase=$phase
+      fail_limit=$limit
+      fail_code=$code
+      partial_body=$partial
+    fi
+  done <"$fixture_dir/failure-plan"
+fi
+
 max_internal=1
 if ((retry > 0)) && ((retry_all == 1 || fail_code == 28)); then
   max_internal=$((retry + 1))
 fi
 
-positive_limit() {
-  [[ "$1" =~ ^[0-9]+([.][0-9]+)?$ && -n "${1//[0.]/}" ]]
-}
-
 request_contract() {
-  local invalid=''
-  positive_limit "$connect_timeout" || invalid+=' --connect-timeout'
-  positive_limit "$max_time" || invalid+=' --max-time'
-  positive_limit "$speed_limit" || invalid+=' --speed-limit'
-  positive_limit "$speed_time" || invalid+=' --speed-time'
-  if [[ -n "$invalid" ]]; then
-    printf '%s: missing/nonpositive limits:%s\n' "$phase" "$invalid" >>"$state_dir/contract-errors"
+  # Ten seconds to connect, ten minutes total, and the documented 30s /
+  # 1 KiB/s stall guard. Positive but ineffective limits must not pass.
+  if ! jq -en --argjson connect "$connect_timeout" --argjson total "$max_time" \
+    --argjson speed "$speed_limit" --argjson interval "$speed_time" \
+    '$connect > 0 and $connect <= 10 and $total > 0 and $total <= 600
+     and $speed == 1024 and $interval == 30' >/dev/null 2>&1; then
+    printf '%s: deadline/stall limits violate the request contract\n' "$phase" >>"$state_dir/contract-errors"
+    return 64
+  fi
+  if [[ "$url" != "$expected_url" || ! -f "$fixture" ]]; then
+    printf '%s: wrong request identity or unknown digest\n' "$phase" >>"$state_dir/contract-errors"
     return 64
   fi
   if [[ "$phase" != token ]] &&
@@ -180,15 +212,14 @@ emit_body() {
 
 attempt_once() {
   local counter_file="$state_dir/$phase.attempts"
-  local n=0
-  if [[ -f "$counter_file" ]]; then
-    n=$(cat "$counter_file")
-    case "$n" in
-      '' | *[!0-9]*) n=0 ;;
-    esac
-  fi
+  local request_counter="$state_dir/$request_key.requests"
+  local n=0 total=0
+  [[ ! -f "$counter_file" ]] || total=$(cat "$counter_file")
+  [[ ! -f "$request_counter" ]] || n=$(cat "$request_counter")
   n=$((n + 1))
-  printf '%s\n' "$n" >"$counter_file"
+  printf '%s\n' "$((total + 1))" >"$counter_file"
+  printf '%s\n' "$n" >"$request_counter"
+  printf 'request %s %d\n' "$request_key" "$n" >>"$state_dir/events"
 
   request_contract || return $?
   if [[ "$phase" == "$fail_phase" ]] && ((n <= fail_limit)); then
@@ -234,10 +265,17 @@ FAKE_CURL
 chmod 0755 "$fake_bin/curl" || fatal 'cannot make fake curl executable'
 cat >"$fake_bin/sleep" <<'FAKE_SLEEP'
 #!/usr/bin/env bash
-# The contract concerns requests and deadlines, not wall-clock backoff.
-exit 0
+# Record real backoff requests without spending wall-clock seconds in CI.
+printf 'sleep %s\n' "$*" >>"${FAKE_CURL_STATE_DIR:?}/events"
 FAKE_SLEEP
 chmod 0755 "$fake_bin/sleep" || fatal 'cannot make fake sleep executable'
+
+register_blob() {
+  # $1 fixture directory, $2 body file, $3 requested digest. The explicit
+  # digest also supports the intentional checksum-mismatch rejection fixture.
+  mkdir -p "$1/blobs" || fatal 'cannot create digest-keyed blob directory'
+  cp "$2" "$1/blobs/$3" || fatal 'cannot register digest-keyed blob'
+}
 
 # Fixture payload: one layer holding an executable host with known bytes.
 payload_src="$work/payload"
@@ -258,6 +296,7 @@ tar -czf "$base_fixture/layer.tar.gz" -C "$payload_src" CLIProxyAPI ||
   fatal 'cannot create layer fixture'
 layer_digest_hex=$(sha256sum "$base_fixture/layer.tar.gz" | cut -d' ' -f1)
 layer_size=$(stat -c%s "$base_fixture/layer.tar.gz")
+register_blob "$base_fixture" "$base_fixture/layer.tar.gz" "sha256:$layer_digest_hex"
 jq -cn \
   --arg digest "sha256:${layer_digest_hex}" \
   --argjson size "$layer_size" \
@@ -307,11 +346,13 @@ run_case() {
     FAKE_CURL_FAIL_EXIT_CODE="${5:-35}" \
     FAKE_CURL_PARTIAL_BODY="${6:-0}" \
     FAKE_CURL_EXPECTED_TOKEN="$sentinel" \
+    FAKE_CURL_EXPECTED_REPOSITORY="$repository" \
+    FAKE_CURL_EXPECTED_MANIFEST="$(jq -r .manifest_digest "$3")" \
     HOST_FIXTURE_EXECUTED_MARKER="$case_dir/host-executed" \
     PATH="$fake_bin:$PATH" \
     timeout --foreground --kill-after=2 "$timeout_seconds" \
     "$extractor" "$3" "$case_dir/out" \
-    >"$case_dir/stdout" 2>"$case_dir/stderr" || exit_code=$?
+    </dev/null >"$case_dir/stdout" 2>"$case_dir/stderr" || exit_code=$?
   cat "$case_dir/stdout" "$case_dir/stderr" >"$case_dir/combined"
 }
 
@@ -337,6 +378,14 @@ safe_output_reasons() {
     printf 'the fixture host was executed; '
   [[ ! -s "$case_dir/state/contract-errors" ]] ||
     printf 'executed curl argument/token contract failed; '
+}
+
+backoff_reasons() {
+  local expected='' actual
+  [[ "$1" != 2 ]] || expected=$'sleep 1\nsleep 2'
+  actual=$(grep '^sleep ' "$case_dir/state/events" 2>/dev/null || true)
+  [[ "$actual" == "$expected" ]] ||
+    printf 'backoff must be exactly 1s/2s between retries and absent after terminal/HTTP/integrity failures; '
 }
 
 # $1 test name, $2 phase that must show transient attempts (or 'none').
@@ -365,6 +414,11 @@ check_success() {
     [[ "$(attempts "$request_phase")" == "$want_attempts" ]] ||
       reasons+="$request_phase attempts=$(attempts "$request_phase") (want exactly $want_attempts); "
   done
+  if [[ "$phase" == none ]]; then
+    reasons+=$(backoff_reasons 0)
+  else
+    reasons+=$(backoff_reasons 2)
+  fi
   reasons+=$(safe_output_reasons)
   if [[ -z "$reasons" ]]; then
     pass "$name"
@@ -407,6 +461,7 @@ check_persistent() {
     ! grep -Fq "sha256:${manifest_digest_hex}" "$case_dir/combined"; then
     reasons+='output carries no safe image context (repository or pinned digest); '
   fi
+  reasons+=$(backoff_reasons "$((want_attempts - 1))")
   reasons+=$(safe_output_reasons)
   if [[ -z "$reasons" ]]; then
     pass "$name"
@@ -447,6 +502,7 @@ check_rejected() {
   if [[ -n "$diagnostic" ]] && ! grep -iqE "$diagnostic" "$case_dir/stderr"; then
     reasons+="missing intended diagnostic: $diagnostic; "
   fi
+  reasons+=$(backoff_reasons 0)
   reasons+=$(safe_output_reasons)
   if [[ -z "$reasons" ]]; then
     pass "$name"
@@ -486,7 +542,7 @@ check_persistent persistent-blob-reset-bounded-nonzero-diagnostic blob 'blob|lay
 # All allowed transport failures recover on request 3 and stop on request 3
 # when persistent. Error 28 exercises timeout handling; 55 covers send errors.
 # Error 35 is already covered by the original named reset cases above.
-for code in 6 7 18 28 52 55 56; do
+for code in 6 7 18 28 52 55 56 92; do
   for phase in token manifest blob; do
     name="transient-${phase}-curl-${code}-recovers-with-exact-bytes"
     setup_case "$name"
@@ -523,8 +579,9 @@ for phase in token manifest blob; do
 done
 
 # The fake rejects every actual request missing a positive connect timeout,
-# total deadline, low-speed limit or low-speed interval. This is an executed
-# argument contract at all three stages, not a source-text assertion.
+# total deadline, low-speed limit or low-speed interval. It also rejects
+# ineffective positive values: connect <=10s, total <=600s, 30s at 1 KiB/s.
+# This runs at all three stages, not as a source-text assertion.
 name='every-fetch-stage-receives-connect-total-and-stall-limits'
 setup_case "$name"
 run_case none 0 "$base_pin" "$base_fixture"
@@ -547,6 +604,7 @@ layer_fixture="$work/fixtures-wrong-layer"
 mkdir -p "$layer_fixture" || fatal 'cannot create wrong-layer fixture directory'
 cp "$base_fixture/token.json" "$base_fixture/layer.tar.gz" "$layer_fixture/" ||
   fatal 'cannot copy wrong-layer fixtures'
+register_blob "$layer_fixture" "$layer_fixture/layer.tar.gz" "sha256:$wrong_layer_hex"
 jq -cn \
   --arg digest "sha256:${wrong_layer_hex}" \
   --argjson size "$layer_size" \
@@ -585,6 +643,7 @@ for kind in directory non-executable-file; do
   fi
   tar -czf "$fixture/layer.tar.gz" -C "$payload" CLIProxyAPI || fatal 'cannot archive rejected host'
   digest=$(sha256sum "$fixture/layer.tar.gz" | cut -d' ' -f1)
+  register_blob "$fixture" "$fixture/layer.tar.gz" "sha256:$digest"
   size=$(stat -c%s "$fixture/layer.tar.gz")
   jq --arg digest "sha256:$digest" --argjson size "$size" \
     '.layers[0].digest = $digest | .layers[0].size = $size' \
@@ -609,6 +668,7 @@ while IFS='|' read -r kind update diagnostic; do
   mkdir -p "$fixture" || fatal 'cannot create rejected-manifest fixture'
   cp "$base_fixture/token.json" "$base_fixture/layer.tar.gz" "$fixture/" ||
     fatal 'cannot copy rejected-manifest fixtures'
+  register_blob "$fixture" "$fixture/layer.tar.gz" "sha256:$layer_digest_hex"
   jq --arg digest "sha256:$layer_digest_hex" "$update" \
     "$base_fixture/manifest.json" >"$fixture/manifest.json" ||
     fatal 'cannot write rejected manifest'
@@ -646,6 +706,239 @@ boolean-platform|.platform = true
 null-platform|.platform = null
 trailing-separator-repository|.repository = "example/repo-"
 PIN_CASES
+
+# Each framing fixture pins the complete stream. A trusted digest does not
+# turn several JSON values (or a scalar) into one image manifest object.
+for kind in invalid-then-valid valid-then-invalid multiple-valid-values array-value null-value number-value string-value; do
+  fixture="$work/fixtures-json-$kind"
+  mkdir -p "$fixture" || fatal 'cannot create JSON stream fixture'
+  cp -R "$base_fixture/." "$fixture/" || fatal 'cannot copy JSON stream fixture'
+  case "$kind" in
+    invalid-then-valid)
+      { printf '{}\n'; cat "$base_fixture/manifest.json"; } >"$fixture/manifest.json"
+      ;;
+    valid-then-invalid)
+      { cat "$base_fixture/manifest.json"; printf '{}\n'; } >"$fixture/manifest.json"
+      ;;
+    multiple-valid-values)
+      cat "$base_fixture/manifest.json" "$base_fixture/manifest.json" >"$fixture/manifest.json"
+      ;;
+    array-value) printf '[]\n' >"$fixture/manifest.json" ;;
+    null-value) printf 'null\n' >"$fixture/manifest.json" ;;
+    number-value) printf '42\n' >"$fixture/manifest.json" ;;
+    string-value) printf '"manifest"\n' >"$fixture/manifest.json" ;;
+  esac
+  digest=$(sha256sum "$fixture/manifest.json" | cut -d' ' -f1)
+  pin="$fixture/pin.json"
+  write_pin "$pin" "$digest" 'linux/amd64'
+  name="manifest-json-$kind-is-rejected-before-blobs"
+  setup_case "$name"
+  run_case none 0 "$pin" "$fixture"
+  check_rejected "$name" manifest
+done
+
+# Two genuinely different digest-keyed blobs: the first provides the host;
+# the second provides a marker, so serving blob one for every URL cannot pass.
+multi_fixture="$work/fixtures-multi"
+marker_payload="$work/payload-marker"
+mkdir -p "$multi_fixture" "$marker_payload/CLIProxyAPI" || fatal 'cannot create multi-layer fixture'
+cp -R "$base_fixture/." "$multi_fixture/" || fatal 'cannot copy multi-layer fixture'
+printf 'distinct second-layer bytes\n' >"$marker_payload/CLIProxyAPI/fixture-marker.txt"
+tar -czf "$multi_fixture/second-layer.tar.gz" -C "$marker_payload" CLIProxyAPI ||
+  fatal 'cannot create second layer'
+second_digest=$(sha256sum "$multi_fixture/second-layer.tar.gz" | cut -d' ' -f1)
+second_size=$(stat -c%s "$multi_fixture/second-layer.tar.gz")
+register_blob "$multi_fixture" "$multi_fixture/second-layer.tar.gz" "sha256:$second_digest"
+jq --arg digest "sha256:$second_digest" --argjson size "$second_size" \
+  '.layers += [{mediaType: "application/vnd.oci.image.layer.v1.tar+gzip", digest: $digest, size: $size}]' \
+  "$base_fixture/manifest.json" >"$multi_fixture/manifest.json" || fatal 'cannot create multi-layer manifest'
+multi_digest=$(sha256sum "$multi_fixture/manifest.json" | cut -d' ' -f1)
+multi_pin="$multi_fixture/pin.json"
+write_pin "$multi_pin" "$multi_digest" 'linux/amd64'
+
+check_multi_success() {
+  local name=$1 fixture=$2 manifest_attempts=$3 first_attempts=$4 second_attempts=$5
+  local reasons='' key n wanted event_expected="$case_dir/expected-events"
+  ((exit_code == 0)) || reasons+="exit=$exit_code (want 0); "
+  printf '%s\n' "$(host_file)" >"$case_dir/expected-stdout"
+  cmp -s "$case_dir/stdout" "$case_dir/expected-stdout" || reasons+='stdout is not exactly the host path; '
+  cmp -s "$(host_file)" "$expected_host" || reasons+='host bytes differ; '
+  [[ -f "$(host_file)" && -x "$(host_file)" ]] || reasons+='host is not a regular executable; '
+  cmp -s "$case_dir/out/rootfs/CLIProxyAPI/fixture-marker.txt" "$marker_payload/CLIProxyAPI/fixture-marker.txt" ||
+    reasons+='distinct second-layer marker bytes differ; '
+  cmp -s "$case_dir/out/manifest.json" "$fixture/manifest.json" || reasons+='manifest bytes differ; '
+  cmp -s "$case_dir/out/layer-1.tar.gz" "$fixture/blobs/sha256:$layer_digest_hex" || reasons+='first blob bytes differ; '
+  cmp -s "$case_dir/out/layer-2.tar.gz" "$fixture/blobs/sha256:$second_digest" || reasons+='second blob bytes differ; '
+  [[ "$(attempts token)" == 1 && "$(attempts manifest)" == "$manifest_attempts" &&
+    "$(attempts blob)" == "$((first_attempts + second_attempts))" ]] ||
+    reasons+='request counts do not match the independent per-request budgets; '
+  : >"$event_expected"
+  for key in token manifest "blob-$layer_digest_hex" "blob-$second_digest"; do
+    case "$key" in
+      token) wanted=1 ;;
+      manifest) wanted=$manifest_attempts ;;
+      "blob-$layer_digest_hex") wanted=$first_attempts ;;
+      *) wanted=$second_attempts ;;
+    esac
+    for ((n = 1; n <= wanted; n++)); do
+      printf 'request %s %d\n' "$key" "$n" >>"$event_expected"
+      if ((n < wanted)); then
+        printf 'sleep %d\n' "$n" >>"$event_expected"
+      fi
+    done
+  done
+  cmp -s "$case_dir/state/events" "$event_expected" ||
+    reasons+='identity/order/backoff trace differs (each request gets 1s/2s retries; no terminal sleep); '
+  reasons+=$(safe_output_reasons)
+  if [[ -z "$reasons" ]]; then pass "$name"; else fail "$name" "$reasons"; fi
+}
+
+name='two-distinct-layers-extract-with-exact-request-identities'
+setup_case "$name"
+run_case none 0 "$multi_pin" "$multi_fixture"
+check_multi_success "$name" "$multi_fixture" 1 1 1
+
+# A malformed later descriptor must prevent even the valid first blob fetch.
+for kind in invalid null; do
+  fixture="$work/fixtures-later-$kind"
+  mkdir -p "$fixture" || fatal 'cannot create later-descriptor fixture'
+  cp -R "$multi_fixture/." "$fixture/" || fatal 'cannot copy later-descriptor fixture'
+  if [[ "$kind" == invalid ]]; then bad_digest='"sha256:not-a-digest"'; else bad_digest=null; fi
+  jq --argjson digest "$bad_digest" '.layers[1].digest = $digest' \
+    "$multi_fixture/manifest.json" >"$fixture/manifest.json" || fatal 'cannot write later-descriptor manifest'
+  digest=$(sha256sum "$fixture/manifest.json" | cut -d' ' -f1)
+  pin="$fixture/pin.json"
+  write_pin "$pin" "$digest" 'linux/amd64'
+  name="later-$kind-descriptor-is-rejected-before-first-blob"
+  setup_case "$name"
+  run_case none 0 "$pin" "$fixture"
+  check_rejected "$name" manifest
+done
+
+for scenario in manifest-and-blob distinct-blobs; do
+  fixture="$work/fixtures-retries-$scenario"
+  mkdir -p "$fixture" || fatal 'cannot create combined-retry fixture'
+  cp -R "$multi_fixture/." "$fixture/" || fatal 'cannot copy combined-retry fixture'
+  if [[ "$scenario" == manifest-and-blob ]]; then
+    printf 'manifest|2|35|0\nblob-%s|2|35|0\n' "$layer_digest_hex" >"$fixture/failure-plan"
+    want_manifest=3
+    want_second=1
+  else
+    printf 'blob-%s|2|35|0\nblob-%s|2|35|0\n' "$layer_digest_hex" "$second_digest" >"$fixture/failure-plan"
+    want_manifest=1
+    want_second=3
+  fi
+  name="$scenario-have-independent-retry-budgets-and-backoff"
+  setup_case "$name"
+  run_case none 0 "$multi_pin" "$fixture"
+  check_multi_success "$name" "$fixture" "$want_manifest" 3 "$want_second"
+done
+
+# An archive can write a valid executable before gzip/tar reports an error.
+# Prove that property on an independent tar probe; the extractor may retain OR
+# remove its partial rootfs, but it must propagate failure without a host path.
+for kind in corrupt-footer invalid-second-layer; do
+  fixture="$work/fixtures-tar-$kind"
+  mkdir -p "$fixture" || fatal 'cannot create tar-failure fixture'
+  cp -R "$multi_fixture/." "$fixture/" || fatal 'cannot copy tar-failure fixture'
+  if [[ "$kind" == corrupt-footer ]]; then
+    python3 - "$base_fixture/layer.tar.gz" "$fixture/bad-layer.tar.gz" <<'CORRUPT_FOOTER'
+from pathlib import Path
+import sys
+body = bytearray(Path(sys.argv[1]).read_bytes())
+body[-8] ^= 1
+Path(sys.argv[2]).write_bytes(body)
+CORRUPT_FOOTER
+    mkdir "$fixture/probe" || fatal 'cannot create independent tar probe'
+    probe_status=0
+    tar -xzf "$fixture/bad-layer.tar.gz" -C "$fixture/probe" 2>"$fixture/probe-error" || probe_status=$?
+    [[ "$probe_status" != 0 && -f "$fixture/probe/CLIProxyAPI/CLIProxyAPI" &&
+      -x "$fixture/probe/CLIProxyAPI/CLIProxyAPI" ]] || fatal 'corrupt footer must fail after producing an executable'
+    source_manifest="$base_fixture/manifest.json"
+    bad_index=0
+    want_blobs=1
+  else
+    printf 'not a gzip archive\n' >"$fixture/bad-layer.tar.gz"
+    source_manifest="$multi_fixture/manifest.json"
+    bad_index=1
+    want_blobs=2
+  fi
+  digest=$(sha256sum "$fixture/bad-layer.tar.gz" | cut -d' ' -f1)
+  size=$(stat -c%s "$fixture/bad-layer.tar.gz")
+  register_blob "$fixture" "$fixture/bad-layer.tar.gz" "sha256:$digest"
+  jq --arg digest "sha256:$digest" --argjson size "$size" --argjson index "$bad_index" \
+    '.layers[$index].digest = $digest | .layers[$index].size = $size' \
+    "$source_manifest" >"$fixture/manifest.json" || fatal 'cannot write tar-failure manifest'
+  digest=$(sha256sum "$fixture/manifest.json" | cut -d' ' -f1)
+  pin="$fixture/pin.json"
+  write_pin "$pin" "$digest" 'linux/amd64'
+  name="tar-$kind-propagates-failure-without-a-host-path"
+  setup_case "$name"
+  run_case none 0 "$pin" "$fixture"
+  reasons=''
+  ((exit_code != 0 && exit_code != 124 && exit_code != 137)) || reasons+='tar error was ignored or timed out; '
+  [[ ! -s "$case_dir/stdout" ]] || reasons+='host path emitted after tar failure; '
+  [[ "$(attempts token)" == 1 && "$(attempts manifest)" == 1 && "$(attempts blob)" == "$want_blobs" ]] ||
+    reasons+='archive fixture did not reach the intended tar boundary; '
+  reasons+=$(backoff_reasons 0)
+  reasons+=$(safe_output_reasons)
+  if [[ -z "$reasons" ]]; then pass "$name"; else fail "$name" "$reasons"; fi
+done
+
+# Real curl + loopback HTTP fixtures check reception bounds, HTTP status and
+# redirects without a permissive fake deciding those semantics for curl.
+http_status=0
+http_failures_before=$fail_count
+http_cases=0
+env -u BASH_ENV HOST_IMAGE_EXTRACTOR="$extractor" \
+  python3 "$root/.github/scripts/extract-host-image_http_test.py" \
+  </dev/null >"$work/http-tests" 2>&1 || http_status=$?
+while IFS= read -r line; do
+  case "$line" in
+    'PASS: '*) pass "${line#PASS: }"; http_cases=$((http_cases + 1)) ;;
+    'FAIL: '*)
+      result=${line#FAIL: }
+      fail "${result%%:*}" "${result#*: }"
+      http_cases=$((http_cases + 1))
+      ;;
+  esac
+done <"$work/http-tests"
+if ((http_cases != 11 || (http_status != 0 && fail_count == http_failures_before))); then
+  fail real-http-harness-completes 'HTTP fixture harness did not execute all eleven assertion cases'
+fi
+
+# A stdin-reading extractor must not consume either while/read fixture table.
+# Run the entire suite again with that behavior and compare executed case names,
+# even while intentional product-boundary assertions are still red.
+if [[ "${HOST_IMAGE_TEST_STDIN_CHILD:-0}" != 1 ]]; then
+  stdin_wrapper="$work/stdin-reader.test-fixture.sh"
+  cat >"$stdin_wrapper" <<'STDIN_READER'
+#!/usr/bin/env bash
+cat >/dev/null
+exec "$REAL_HOST_IMAGE_EXTRACTOR" "$@"
+STDIN_READER
+  chmod 0755 "$stdin_wrapper" || fatal 'cannot make stdin-reader fixture executable'
+  printf '%s\n' "${case_names[@]}" >"$work/expected-case-names"
+  child_status=0
+  env -u BASH_ENV HOST_IMAGE_TEST_STDIN_CHILD=1 \
+    REAL_HOST_IMAGE_EXTRACTOR="$extractor" HOST_IMAGE_EXTRACTOR="$stdin_wrapper" \
+    timeout --foreground --kill-after=2 120 bash "${BASH_SOURCE[0]}" \
+    </dev/null >"$work/stdin-child-output" 2>&1 || child_status=$?
+  : >"$work/child-case-names"
+  while IFS= read -r line; do
+    case "$line" in
+      'PASS: '* | 'FAIL: '*)
+        result=${line#*: }
+        printf '%s\n' "${result%%:*}" >>"$work/child-case-names"
+        ;;
+    esac
+  done <"$work/stdin-child-output"
+  if ((child_status <= 1)) && cmp -s "$work/expected-case-names" "$work/child-case-names"; then
+    pass stdin-reading-extractor-cannot-consume-fixture-tables
+  else
+    fail stdin-reading-extractor-cannot-consume-fixture-tables 'stdin reader skipped cases or terminated the suite'
+  fi
+fi
 
 printf '%d passed, %d failed\n' "$pass_count" "$fail_count"
 ((fail_count == 0))
