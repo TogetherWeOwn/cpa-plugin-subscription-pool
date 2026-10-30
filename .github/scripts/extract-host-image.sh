@@ -9,14 +9,29 @@ die() {
   exit 1
 }
 
+# `@tsv` stringifies whatever the pin holds, so a boolean or null would become
+# the valid-looking name `false` or `null` and reach the registry. Require the
+# JSON types first, then convert.
+bad_type=$(jq -r '
+  . as $pin
+  | ["repository", "manifest_digest", "platform"]
+  | map(select(($pin[.] | type) != "string"))
+  | first // empty
+' "$pin") || die 'cannot read the image pin JSON'
+[[ -z "$bad_type" ]] ||
+  die "image pin field $bad_type must be a JSON string"
+
 fields=$(jq -er '[.repository, .manifest_digest, .platform] | @tsv' "$pin") ||
   die 'cannot read the image pin JSON'
 IFS=$'\t' read -r repository digest platform <<<"$fields"
 
-# The pin is interpolated into registry URLs, so validate it rather than
-# trusting the producer: a name or digest carrying `?`, `#` or `..` would
-# rewrite the request path or the token scope.
-[[ "$repository" =~ ^[a-z0-9][a-z0-9._-]*(/[a-z0-9][a-z0-9._-]*)*$ && "$repository" != *..* ]] ||
+# The pin is interpolated into registry URLs, so validate it against Docker's
+# reference name grammar rather than trusting the producer: this is stricter
+# than a component being merely "not empty", so it rejects trailing separators
+# (`example/repo-`) and every `..` path segment, and a name carrying `?` or `#`
+# cannot rewrite the request path or the token scope.
+repository_component='[a-z0-9]+((\.|_|__|-+)[a-z0-9]+)*'
+[[ "$repository" =~ ^${repository_component}(/${repository_component})*$ ]] ||
   die "image pin has an invalid repository name: $repository"
 [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] ||
   die "image pin has an invalid manifest digest for $repository: $digest"
@@ -42,7 +57,7 @@ max_time=600
 
 retryable() {
   case "$1" in
-    6 | 7 | 18 | 28 | 35 | 52 | 56) return 0 ;;
+    6 | 7 | 18 | 28 | 35 | 52 | 55 | 56) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -141,8 +156,14 @@ resolved=$(sha256sum "$manifest" | cut -d' ' -f1) ||
 # Read the digests from a file, not `$(...)`: command substitution strips
 # trailing newlines, which would silently drop a trailing empty digest and
 # skip validating it.
+# `jq -e` exits 4 when the filter yields nothing, so an empty `.layers` array
+# would stop here with the generic message and the "declares no layers" gate
+# below would be unreachable. Without `-e`, a missing or non-array `.layers`
+# still fails the assignment (null iterates to nothing, and a jq error still
+# exits non-zero), while an empty array now falls through to the real gate.
 digests="$out/layer-digests.txt"
-jq -er '.layers[].digest' "$manifest" >"$digests" ||
+jq -r 'if (.layers | type) == "array" then .layers[].digest else error("layers is not an array") end' \
+  "$manifest" >"$digests" ||
   die "manifest for $repository has no readable layer list"
 
 index=0
