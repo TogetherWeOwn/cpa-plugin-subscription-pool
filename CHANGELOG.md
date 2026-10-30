@@ -8,9 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
-- Host image extraction retries a transient transport failure (reset connection, stalled connect, empty reply, partial transfer, resolver hiccup) at the token, manifest and layer stages instead of failing on the first `curl: (35) Recv failure: Connection reset by peer`. Each request gets at most three attempts with a short backoff. HTTP errors, digest mismatches, a non-linux/amd64 pin, an unreadable layer archive and a missing host binary still fail immediately, before any host is executed.
-- Each attempt downloads into its own scratch file and replaces the destination only on success, so a partial response body can never be joined to the next attempt's body and a corrupt token or manifest can no longer survive a successful retry.
-- Extraction failures now identify what failed on stderr: a fetch failure names the phase, repository, curl exit code and attempt count, and the digest, platform, archive and host checks name what they rejected. Stdout still carries only the extracted host path, and bearer tokens and request headers are never printed.
+- Host image extraction retries a transient transport failure (reset connection, stalled connect, empty reply, partial transfer, resolver hiccup) at the token, manifest and layer stages instead of failing on the first `curl: (35) Recv failure: Connection reset by peer`. Each request gets at most three attempts with a short backoff. HTTP errors, digest mismatches, a rejected pin, an unreadable layer archive and a missing host binary still fail immediately, before any host is executed.
+- A response body is used only after its request completed, and file downloads land in a scratch file beside the destination that is renamed into place on success, so partial bytes can never be joined to a later attempt. A transfer that stalls mid-body aborts after 30 seconds below 1 KiB/s instead of waiting for the job timeout.
+- The image pin is validated before it is used: the repository name, manifest digest and platform must match the expected shapes, and the host binary must be a regular executable file.
+- Extraction failures now identify what failed on stderr: a fetch failure names the phase, repository, curl exit code and attempt count, and the pin, digest, platform, archive and host checks name what they rejected. Stdout still carries only the extracted host path, and bearer tokens and request headers are never printed.
 - `.github/scripts/extract-host-image_test.sh` exercises this offline with a fake `curl`; `make test-host-extract` runs it in the CI `quality` job.
 
 ## [0.7.0] - 2026-10-24
