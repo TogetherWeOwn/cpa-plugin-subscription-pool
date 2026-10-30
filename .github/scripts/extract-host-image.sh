@@ -54,10 +54,11 @@ connect_timeout=10
 stall_speed=1024
 stall_time=30
 max_time=600
+max_token_bytes=1048576
 
 retryable() {
   case "$1" in
-    6 | 7 | 18 | 28 | 35 | 52 | 55 | 56) return 0 ;;
+    6 | 7 | 18 | 28 | 35 | 52 | 55 | 56 | 92) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -78,19 +79,28 @@ fetch_report() {
 fetch_stdout() {
   # fetch_stdout <phase> <url> [curl args...] — print the body, or nothing.
   #
-  # The body is captured in a variable, never streamed, so a failed attempt
-  # cannot leave partial bytes in the caller's capture where they would be
-  # concatenated with a successful retry's body.
+  # Bound the token while receiving it, even without Content-Length, before
+  # any shell capture. One extra byte distinguishes an oversized response from
+  # one exactly at the limit. A failed attempt never contributes stdout bytes.
   local phase=$1 url=$2
   shift 2
   local -a extra=("$@")
-  local attempt status body
+  local attempt status size scratch
+  scratch=$(mktemp "$out/.extract-host-token.XXXXXX") ||
+    die "$phase: cannot create a token scratch file"
   for ((attempt = 1; attempt <= max_attempts; attempt++)); do
     status=0
-    body=$(curl "${curl_args[@]}" ${extra[@]+"${extra[@]}"} "$url") || status=$?
+    curl "${curl_args[@]}" ${extra[@]+"${extra[@]}"} "$url" |
+      head -c "$((max_token_bytes + 1))" >"$scratch" || status=$?
+    size=$(wc -c <"$scratch")
+    if ((size > max_token_bytes)); then
+      rm -f "$scratch"
+      die "$phase response for $repository exceeds $max_token_bytes bytes"
+    fi
     if ((status == 0)); then
-      printf '%s' "$body"
-      return 0
+      cat "$scratch" || status=$?
+      rm -f "$scratch"
+      return "$status"
     fi
     if ((attempt < max_attempts)) && retryable "$status"; then
       printf 'extract-host-image: %s request for %s failed (curl exit %d); retrying (%d/%d)\n' \
@@ -98,6 +108,7 @@ fetch_stdout() {
       sleep "$attempt"
       continue
     fi
+    rm -f "$scratch"
     fetch_report "$phase" "$attempt" "$status"
     return "$status"
   done
@@ -158,8 +169,11 @@ resolved=$(sha256sum "$manifest" | cut -d' ' -f1) ||
 # succeeds, so an invalid descriptor stops every blob fetch.
 # Do not use `jq -e`: an empty array must reach the "declares no layers" gate.
 digests="$out/layer-digests.txt"
-jq -r '
-  if (.layers | type) == "array" then
+jq -sr '
+  if length != 1 or (.[0] | type) != "object" then
+    error("manifest must contain exactly one JSON object")
+  else .[0] end
+  | if (.layers | type) == "array" then
     .layers[].digest |
     if type == "string" and test("\\Asha256:[0-9a-f]{64}\\z") then .
     else error("invalid layer digest") end
