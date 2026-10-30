@@ -7,6 +7,7 @@ bytes and the measured pipe buffer detect late, post-download validation;
 server socket writes/BrokenPipe are diagnostics only, not receiver consumption.
 No registry traffic or fixture-host execution is permitted.
 """
+from dataclasses import dataclass
 import gzip
 import hashlib
 import http.server
@@ -30,6 +31,20 @@ TOKEN_CEILING = 1024 * 1024
 OVERSIZED_LENGTH = 2 * TOKEN_CEILING
 CHUNK_SIZE = 64 * 1024
 HOST_BYTES = b"#!/bin/sh\nprintf 'must-not-execute\\n' >\"$HOST_FIXTURE_EXECUTED_MARKER\"\n"
+EXPECTED_TOKEN_JSON = b'{"token": "loopback-token-sentinel"}'
+
+
+@dataclass(frozen=True)
+class CaseSpec:
+    # All oracle inputs are mandatory and independent of the generated fixture.
+    # Omitting them must fail closed, never adopt fixture constructor defaults.
+    name: str
+    mode: str
+    phase: str
+    two_layers: bool
+    token_length: int
+    receiver_delay: float
+    want_success: bool
 
 
 def digest(body):
@@ -121,6 +136,7 @@ class RegistryFixture:
                     body = fixture.stream_body
                 partial = phase == "token" and fixture.mode == "partial" and attempt == 1
                 intended, sent, broken = len(body), 0, False
+                complete_body_digest = digest(body)
                 self.close_connection = True
                 try:
                     self.send_response(code)
@@ -154,8 +170,10 @@ class RegistryFixture:
                 finally:
                     if phase == "token":
                         with fixture.lock:
-                            fixture.transfers.append({"intended": intended, "sent": sent,
-                                                      "broken": broken, "partial": partial})
+                            fixture.transfers.append({"intended": intended,
+                                                      "body_digest": complete_body_digest,
+                                                      "sent": sent, "broken": broken,
+                                                      "partial": partial})
 
         class Server(http.server.ThreadingHTTPServer):
             daemon_threads = False
@@ -207,6 +225,7 @@ def curl_wrapper(arguments):
     child = subprocess.Popen(command, stdout=subprocess.PIPE, stdin=subprocess.DEVNULL)
     broken = False
     receiver_delayed = False
+    applied_receiver_delay = 0
     try:
         while True:
             block = os.read(child.stdout.fileno(), 4096)
@@ -217,7 +236,8 @@ def curl_wrapper(arguments):
                     if phase == "token" and config["receiver_delay"] and not receiver_delayed:
                         # Deterministic descheduling at the first forwarded write.
                         # The sender may finish into TCP buffers while we pause.
-                        time.sleep(config["receiver_delay"])
+                        applied_receiver_delay = config["receiver_delay"]
+                        time.sleep(applied_receiver_delay)
                         receiver_delayed = True
                     count = os.write(1, block)
                 except BrokenPipeError:
@@ -234,6 +254,7 @@ def curl_wrapper(arguments):
         record = {"phase": phase, "identity": key, "forwarded": forwarded,
                   "pipe_capacity": pipe_capacity, "broken": broken,
                   "receiver_delayed": receiver_delayed,
+                  "receiver_delay_seconds": applied_receiver_delay,
                   "fail": any(flag in arguments for flag in ("--fail", "--fail-with-body", "-f")),
                   "location": any(flag in arguments for flag in ("--location", "-L")),
                   "max_filesize": option_value(arguments, "--max-filesize")}
@@ -293,9 +314,46 @@ def success_reasons(fixture, status, stdout):
     return reasons
 
 
-def case_reasons(fixture, result, mode, phase):
-    status, stdout, stderr, records = result
+def input_reasons(fixture, records, case: CaseSpec):
+    # Expectations come only from the immutable case, never constructor defaults.
+    expected_body = b" " * (case.token_length - len(EXPECTED_TOKEN_JSON)) + EXPECTED_TOKEN_JSON
+    generated = fixture.stream_body if case.mode in ("declared", "chunked") else fixture.token_body
     reasons = []
+    if len(generated) != case.token_length:
+        reasons.append(f"generated token body length={len(generated)} (want {case.token_length})")
+    try:
+        if json.loads(generated) != {"token": "loopback-token-sentinel"}:
+            reasons.append("generated token JSON identity differs from the case")
+    except (ValueError, UnicodeError):
+        reasons.append("generated token body is not complete valid JSON")
+    if not fixture.transfers:
+        reasons.append("no complete token input was recorded by the fixture")
+    elif any(transfer["intended"] != case.token_length for transfer in fixture.transfers):
+        lengths = [transfer["intended"] for transfer in fixture.transfers]
+        reasons.append(f"served complete token lengths={lengths} (want {case.token_length})")
+    if any(transfer["body_digest"] != digest(expected_body) for transfer in fixture.transfers):
+        reasons.append("served complete token bytes differ from the requested JSON input")
+    if fixture.mode != case.mode or fixture.phase != case.phase:
+        reasons.append("effective fixture mode/phase differs from the case")
+    if len(fixture.layers) != (2 if case.two_layers else 1):
+        reasons.append("effective layer count differs from the case")
+    if fixture.receiver_delay != case.receiver_delay:
+        reasons.append(f"effective receiver delay={fixture.receiver_delay} (want {case.receiver_delay})")
+    token_records = [record for record in records if record.get("phase") == "token"]
+    if not token_records:
+        reasons.append("no executed token request was measured")
+    for record in token_records:
+        if record["receiver_delay_seconds"] != case.receiver_delay:
+            reasons.append(f"executed receiver delay={record['receiver_delay_seconds']} (want {case.receiver_delay})")
+        if record["receiver_delayed"] != bool(case.receiver_delay):
+            reasons.append("requested receiver scheduling delay was not executed as specified")
+    return reasons
+
+
+def case_reasons(fixture, result, case: CaseSpec):
+    status, stdout, stderr, records = result
+    mode, phase = case.mode, case.phase
+    reasons = input_reasons(fixture, records, case)
     original = [row for row in fixture.requests if not row[2]]
     counts = {stage: sum(row[0] == stage for row in original) for stage in ("token", "manifest", "blob")}
     if fixture.token.encode() in stdout + stderr:
@@ -308,8 +366,8 @@ def case_reasons(fixture, result, mode, phase):
         reasons.append("request identity or recovered bearer token differs")
     if any("contract_error" in record for record in records):
         reasons.append("unexpected original request identity")
-    oversized = mode in ("declared", "chunked") and len(fixture.stream_body) > TOKEN_CEILING
-    if mode == "401" or oversized:
+    oversized = mode in ("declared", "chunked") and not case.want_success
+    if not case.want_success:
         if status == 0 or status in (124, 137):
             reasons.append(f"exit={status} (want bounded nonzero rejection)")
         if stdout:
@@ -320,7 +378,7 @@ def case_reasons(fixture, result, mode, phase):
         if oversized:
             if not 1 <= counts["token"] <= 3 or counts["manifest"] or counts["blob"]:
                 reasons.append(f"oversized token advanced to later phases: {counts}")
-            if len(fixture.stream_body) == TOKEN_CEILING + 1 and counts["token"] != 1:
+            if case.token_length == TOKEN_CEILING + 1 and counts["token"] != 1:
                 reasons.append("cap-plus-one token must fail immediately without retries")
             if b"token" not in stderr.lower() or not re.search(
                     rb"exceed|too\s+(large|big)|limit|ceiling|\bcap\b", stderr, re.I):
@@ -329,7 +387,7 @@ def case_reasons(fixture, result, mode, phase):
             reasons.append(f"HTTP failure request counts={tuple(counts.values())}, want {expected}")
     else:
         reasons += success_reasons(fixture, status, stdout)
-        expected = (2 if mode == "partial" else 1, 1, len(fixture.layers))
+        expected = (2 if mode == "partial" else 1, 1, 2 if case.two_layers else 1)
         if tuple(counts.values()) != expected:
             reasons.append(f"request counts={tuple(counts.values())}, want {expected}")
     if oversized:
@@ -343,8 +401,6 @@ def case_reasons(fixture, result, mode, phase):
             # buffer. The receive bound itself remains unchanged.
             if record["forwarded"] > TOKEN_CEILING + record["pipe_capacity"]:
                 reasons.append(f"forwarded token bytes={record['forwarded']} exceed ceiling plus measured pipe buffer")
-            if fixture.receiver_delay and record["forwarded"] and not record["receiver_delayed"]:
-                reasons.append("receiver scheduling-delay fixture did not run")
             limit = record["max_filesize"]
             if limit is not None:
                 parsed = re.fullmatch(r"(\d+)([KMGkmg]?)", limit)
@@ -368,33 +424,45 @@ def case_reasons(fixture, result, mode, phase):
 
 
 CASES = [
-    ("r3-http-normal-token-success-exact-bytes", "normal", "token", False),
-    ("r3-http-oversized-token-with-length-rejected-during-reception", "declared", "token", False),
-    ("r3-http-oversized-token-chunked-rejected-during-reception", "chunked", "token", False),
-    ("r3-http-transient-truncated-token-recovers-with-exact-bytes", "partial", "token", False),
-    ("r7-http-two-layer-exact-urls-and-tokens", "normal", "token", True),
-    ("r7-http-token-401-fails-with-fail-option", "401", "token", True),
-    ("r7-http-manifest-401-fails-with-fail-option", "401", "manifest", True),
-    ("r7-http-blob-401-fails-with-fail-option", "401", "blob", True),
-    ("r7-http-token-redirect-followed-with-location", "redirect", "token", True),
-    ("r7-http-manifest-redirect-followed-with-location", "redirect", "manifest", True),
-    ("r7-http-blob-redirect-followed-with-location", "redirect", "blob", True),
-    ("r9-http-declared-rejection-survives-delayed-receiver", "declared", "token", False,
-     {"receiver_delay": 0.25}),
-    ("r9-http-chunked-rejection-survives-delayed-receiver", "chunked", "token", False,
-     {"receiver_delay": 0.25}),
-    ("r10-http-token-cap-minus-one-declared-succeeds", "declared", "token", False,
-     {"token_length": 1048575}),
-    ("r10-http-token-exact-cap-declared-succeeds", "declared", "token", False,
-     {"token_length": 1048576}),
-    ("r10-http-token-cap-plus-one-declared-is-rejected", "declared", "token", False,
-     {"token_length": 1048577}),
-    ("r10-http-token-cap-minus-one-chunked-succeeds", "chunked", "token", False,
-     {"token_length": 1048575}),
-    ("r10-http-token-exact-cap-chunked-succeeds", "chunked", "token", False,
-     {"token_length": 1048576}),
-    ("r10-http-token-cap-plus-one-chunked-is-rejected", "chunked", "token", False,
-     {"token_length": 1048577}),
+    # name, mode, phase, two layers, complete token bytes, delay seconds, success
+    CaseSpec("r3-http-normal-token-success-exact-bytes", "normal", "token", False,
+             len(EXPECTED_TOKEN_JSON), 0, True),
+    CaseSpec("r3-http-oversized-token-with-length-rejected-during-reception", "declared", "token", False,
+             2097152, 0, False),
+    CaseSpec("r3-http-oversized-token-chunked-rejected-during-reception", "chunked", "token", False,
+             2097152, 0, False),
+    CaseSpec("r3-http-transient-truncated-token-recovers-with-exact-bytes", "partial", "token", False,
+             len(EXPECTED_TOKEN_JSON), 0, True),
+    CaseSpec("r7-http-two-layer-exact-urls-and-tokens", "normal", "token", True,
+             len(EXPECTED_TOKEN_JSON), 0, True),
+    CaseSpec("r7-http-token-401-fails-with-fail-option", "401", "token", True,
+             len(EXPECTED_TOKEN_JSON), 0, False),
+    CaseSpec("r7-http-manifest-401-fails-with-fail-option", "401", "manifest", True,
+             len(EXPECTED_TOKEN_JSON), 0, False),
+    CaseSpec("r7-http-blob-401-fails-with-fail-option", "401", "blob", True,
+             len(EXPECTED_TOKEN_JSON), 0, False),
+    CaseSpec("r7-http-token-redirect-followed-with-location", "redirect", "token", True,
+             len(EXPECTED_TOKEN_JSON), 0, True),
+    CaseSpec("r7-http-manifest-redirect-followed-with-location", "redirect", "manifest", True,
+             len(EXPECTED_TOKEN_JSON), 0, True),
+    CaseSpec("r7-http-blob-redirect-followed-with-location", "redirect", "blob", True,
+             len(EXPECTED_TOKEN_JSON), 0, True),
+    CaseSpec("r9-http-declared-rejection-survives-delayed-receiver", "declared", "token", False,
+             2097152, 0.25, False),
+    CaseSpec("r9-http-chunked-rejection-survives-delayed-receiver", "chunked", "token", False,
+             2097152, 0.25, False),
+    CaseSpec("r10-http-token-cap-minus-one-declared-succeeds", "declared", "token", False,
+             1048575, 0, True),
+    CaseSpec("r10-http-token-exact-cap-declared-succeeds", "declared", "token", False,
+             1048576, 0, True),
+    CaseSpec("r10-http-token-cap-plus-one-declared-is-rejected", "declared", "token", False,
+             1048577, 0, False),
+    CaseSpec("r10-http-token-cap-minus-one-chunked-succeeds", "chunked", "token", False,
+             1048575, 0, True),
+    CaseSpec("r10-http-token-exact-cap-chunked-succeeds", "chunked", "token", False,
+             1048576, 0, True),
+    CaseSpec("r10-http-token-cap-plus-one-chunked-is-rejected", "chunked", "token", False,
+             1048577, 0, False),
 ]
 
 
@@ -407,22 +475,23 @@ def main():
         print("FAIL: real-http-harness-setup: curl or extractor is unavailable", flush=True)
         return 1
     failures = 0
-    for name, mode, phase, two_layers, *parameters in CASES:
-        options = parameters[0] if parameters else {}
+    for case in CASES:
         try:
             with tempfile.TemporaryDirectory(prefix="host-image-http-") as directory:
-                fixture = RegistryFixture(directory, mode, phase, two_layers, **options)
+                fixture = RegistryFixture(directory, case.mode, case.phase, case.two_layers,
+                                          token_length=case.token_length,
+                                          receiver_delay=case.receiver_delay)
                 with fixture:
                     result = run_extractor(fixture, extractor, real_curl)
-                reasons = case_reasons(fixture, result, mode, phase)
+                reasons = case_reasons(fixture, result, case)
         except Exception as error:
             # Exception bodies may contain raw response bytes; report type only.
             reasons = [f"fixture error: {type(error).__name__}"]
         if reasons:
-            print(f"FAIL: {name}: {'; '.join(reasons)}", flush=True)
+            print(f"FAIL: {case.name}: {'; '.join(reasons)}", flush=True)
             failures += 1
         else:
-            print(f"PASS: {name}", flush=True)
+            print(f"PASS: {case.name}", flush=True)
     return int(failures != 0)
 
 
