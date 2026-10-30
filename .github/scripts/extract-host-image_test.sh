@@ -903,8 +903,8 @@ while IFS= read -r line; do
       ;;
   esac
 done <"$work/http-tests"
-if ((http_cases != 11 || (http_status != 0 && fail_count == http_failures_before))); then
-  fail real-http-harness-completes 'HTTP fixture harness did not execute all eleven assertion cases'
+if ((http_cases != 19 || (http_status != 0 && fail_count == http_failures_before))); then
+  fail real-http-harness-completes 'HTTP fixture harness did not execute all nineteen assertion cases'
 fi
 
 # A stdin-reading extractor must not consume either while/read fixture table.

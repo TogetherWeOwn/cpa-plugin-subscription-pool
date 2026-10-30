@@ -2,8 +2,9 @@
 """Real curl against loopback: bounded token reception, HTTP errors and redirects.
 
 The curl wrapper validates the original request before rewriting only its URL.
-It forwards bytes without imposing a size limit itself; both server-side sent
-bytes and client-side forwarded bytes expose late, post-download validation.
+It forwards bytes without imposing a size limit itself. Receiver-side forwarded
+bytes and the measured pipe buffer detect late, post-download validation;
+server socket writes/BrokenPipe are diagnostics only, not receiver consumption.
 No registry traffic or fixture-host execution is permitted.
 """
 import gzip
@@ -45,11 +46,15 @@ def layer_archive(name, body, mode=0o644):
 
 
 class RegistryFixture:
-    def __init__(self, directory, mode="normal", phase="token", two_layers=True):
+    def __init__(self, directory, mode="normal", phase="token", two_layers=True,
+                 token_length=OVERSIZED_LENGTH, receiver_delay=0):
         self.directory, self.mode, self.phase = Path(directory), mode, phase
         self.token = "loopback-token-sentinel"
         self.token_body = json.dumps({"token": self.token}).encode()
-        self.oversized_body = b" " * (OVERSIZED_LENGTH - len(self.token_body)) + self.token_body
+        if token_length < len(self.token_body):
+            raise ValueError("fixture length cannot contain the complete token JSON")
+        self.stream_body = b" " * (token_length - len(self.token_body)) + self.token_body
+        self.receiver_delay = receiver_delay
         self.host_path = "CLIProxyAPI/CLIProxyAPI"
         self.layers = [layer_archive(self.host_path, HOST_BYTES, 0o755)]
         if two_layers:
@@ -110,10 +115,10 @@ class RegistryFixture:
                     code = 401
                 elif not redirect and targeted and fixture.mode == "redirect":
                     code = 302
-                oversized = phase == "token" and fixture.mode in ("declared", "chunked")
-                chunked = oversized and fixture.mode == "chunked"
-                if oversized:
-                    body = fixture.oversized_body
+                framed_token = phase == "token" and fixture.mode in ("declared", "chunked")
+                chunked = framed_token and fixture.mode == "chunked"
+                if framed_token:
+                    body = fixture.stream_body
                 partial = phase == "token" and fixture.mode == "partial" and attempt == 1
                 intended, sent, broken = len(body), 0, False
                 self.close_connection = True
@@ -138,7 +143,7 @@ class RegistryFixture:
                             self.wfile.write(b"\r\n")
                         self.wfile.flush()
                         sent += len(block)
-                        if oversized:
+                        if framed_token:
                             # Allow a receiver to close; no elapsed-time assertion.
                             time.sleep(0.005)
                     if chunked:
@@ -201,6 +206,7 @@ def curl_wrapper(arguments):
     command += [rewritten if argument == urls[0] else argument for argument in arguments]
     child = subprocess.Popen(command, stdout=subprocess.PIPE, stdin=subprocess.DEVNULL)
     broken = False
+    receiver_delayed = False
     try:
         while True:
             block = os.read(child.stdout.fileno(), 4096)
@@ -208,6 +214,11 @@ def curl_wrapper(arguments):
                 break
             while block:
                 try:
+                    if phase == "token" and config["receiver_delay"] and not receiver_delayed:
+                        # Deterministic descheduling at the first forwarded write.
+                        # The sender may finish into TCP buffers while we pause.
+                        time.sleep(config["receiver_delay"])
+                        receiver_delayed = True
                     count = os.write(1, block)
                 except BrokenPipeError:
                     broken = True
@@ -222,6 +233,7 @@ def curl_wrapper(arguments):
         status = child.wait()
         record = {"phase": phase, "identity": key, "forwarded": forwarded,
                   "pipe_capacity": pipe_capacity, "broken": broken,
+                  "receiver_delayed": receiver_delayed,
                   "fail": any(flag in arguments for flag in ("--fail", "--fail-with-body", "-f")),
                   "location": any(flag in arguments for flag in ("--location", "-L")),
                   "max_filesize": option_value(arguments, "--max-filesize")}
@@ -241,7 +253,8 @@ def run_extractor(fixture, extractor, real_curl):
     log, config = fixture.directory / "requests.jsonl", fixture.directory / "config.json"
     log.write_text("")
     config.write_text(json.dumps({"port": fixture.port, "curl": real_curl,
-                                  "identities": identities, "log": str(log)}))
+                                  "identities": identities, "log": str(log),
+                                  "receiver_delay": fixture.receiver_delay}))
     environment = {key: value for key, value in os.environ.items()
                    if key != "BASH_ENV" and not key.lower().endswith("proxy")}
     environment.update({"PATH": f"{wrapper_dir}:{os.environ.get('PATH', '')}",
@@ -295,7 +308,7 @@ def case_reasons(fixture, result, mode, phase):
         reasons.append("request identity or recovered bearer token differs")
     if any("contract_error" in record for record in records):
         reasons.append("unexpected original request identity")
-    oversized = mode in ("declared", "chunked")
+    oversized = mode in ("declared", "chunked") and len(fixture.stream_body) > TOKEN_CEILING
     if mode == "401" or oversized:
         if status == 0 or status in (124, 137):
             reasons.append(f"exit={status} (want bounded nonzero rejection)")
@@ -307,6 +320,11 @@ def case_reasons(fixture, result, mode, phase):
         if oversized:
             if not 1 <= counts["token"] <= 3 or counts["manifest"] or counts["blob"]:
                 reasons.append(f"oversized token advanced to later phases: {counts}")
+            if len(fixture.stream_body) == TOKEN_CEILING + 1 and counts["token"] != 1:
+                reasons.append("cap-plus-one token must fail immediately without retries")
+            if b"token" not in stderr.lower() or not re.search(
+                    rb"exceed|too\s+(large|big)|limit|ceiling|\bcap\b", stderr, re.I):
+                reasons.append("token size rejection diagnostic is missing")
         elif tuple(counts.values()) != expected:
             reasons.append(f"HTTP failure request counts={tuple(counts.values())}, want {expected}")
     else:
@@ -315,21 +333,18 @@ def case_reasons(fixture, result, mode, phase):
         if tuple(counts.values()) != expected:
             reasons.append(f"request counts={tuple(counts.values())}, want {expected}")
     if oversized:
-        if not fixture.transfers:
-            reasons.append("no token stream measured")
-        for transfer in fixture.transfers:
-            if transfer["sent"] >= OVERSIZED_LENGTH:
-                reasons.append("server sent the full 2 MiB token body")
-            if transfer["sent"] > TOKEN_CEILING + 256 * 1024 or not transfer["broken"]:
-                reasons.append("producer did not stop near the token ceiling")
+        # TCP writes can finish into socket buffers while the receiver is
+        # descheduled. Server sent/BrokenPipe totals are diagnostics only.
         token_records = [record for record in records if record.get("phase") == "token"]
         if not token_records:
             reasons.append("no executed token transfer measured")
         for record in token_records:
-            # Successful writes can lead the consumer by one pipe buffer. This
-            # is measured, not a 256 KiB allowance for an oversized capture.
+            # Successful writes can lead the consumer by one measured pipe
+            # buffer. The receive bound itself remains unchanged.
             if record["forwarded"] > TOKEN_CEILING + record["pipe_capacity"]:
                 reasons.append(f"forwarded token bytes={record['forwarded']} exceed ceiling plus measured pipe buffer")
+            if fixture.receiver_delay and record["forwarded"] and not record["receiver_delayed"]:
+                reasons.append("receiver scheduling-delay fixture did not run")
             limit = record["max_filesize"]
             if limit is not None:
                 parsed = re.fullmatch(r"(\d+)([KMGkmg]?)", limit)
@@ -364,6 +379,22 @@ CASES = [
     ("r7-http-token-redirect-followed-with-location", "redirect", "token", True),
     ("r7-http-manifest-redirect-followed-with-location", "redirect", "manifest", True),
     ("r7-http-blob-redirect-followed-with-location", "redirect", "blob", True),
+    ("r9-http-declared-rejection-survives-delayed-receiver", "declared", "token", False,
+     {"receiver_delay": 0.25}),
+    ("r9-http-chunked-rejection-survives-delayed-receiver", "chunked", "token", False,
+     {"receiver_delay": 0.25}),
+    ("r10-http-token-cap-minus-one-declared-succeeds", "declared", "token", False,
+     {"token_length": 1048575}),
+    ("r10-http-token-exact-cap-declared-succeeds", "declared", "token", False,
+     {"token_length": 1048576}),
+    ("r10-http-token-cap-plus-one-declared-is-rejected", "declared", "token", False,
+     {"token_length": 1048577}),
+    ("r10-http-token-cap-minus-one-chunked-succeeds", "chunked", "token", False,
+     {"token_length": 1048575}),
+    ("r10-http-token-exact-cap-chunked-succeeds", "chunked", "token", False,
+     {"token_length": 1048576}),
+    ("r10-http-token-cap-plus-one-chunked-is-rejected", "chunked", "token", False,
+     {"token_length": 1048577}),
 ]
 
 
@@ -376,10 +407,11 @@ def main():
         print("FAIL: real-http-harness-setup: curl or extractor is unavailable", flush=True)
         return 1
     failures = 0
-    for name, mode, phase, two_layers in CASES:
+    for name, mode, phase, two_layers, *parameters in CASES:
+        options = parameters[0] if parameters else {}
         try:
             with tempfile.TemporaryDirectory(prefix="host-image-http-") as directory:
-                fixture = RegistryFixture(directory, mode, phase, two_layers)
+                fixture = RegistryFixture(directory, mode, phase, two_layers, **options)
                 with fixture:
                     result = run_extractor(fixture, extractor, real_curl)
                 reasons = case_reasons(fixture, result, mode, phase)
