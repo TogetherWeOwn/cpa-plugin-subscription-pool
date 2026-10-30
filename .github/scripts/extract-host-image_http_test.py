@@ -10,6 +10,7 @@ No registry traffic or fixture-host execution is permitted.
 from dataclasses import dataclass
 import gzip
 import hashlib
+import http.client
 import http.server
 import io
 import json
@@ -102,7 +103,16 @@ class RegistryFixture:
             def log_message(self, *_args):
                 pass
 
+            def flush_headers(self):
+                # Observe the serialized headers actually written to the socket,
+                # independently of the mode label and framing branch below.
+                raw = b"".join(self._headers_buffer)
+                super().flush_headers()
+                headers = http.client.parse_headers(io.BytesIO(raw.split(b"\r\n", 1)[1]))
+                self.emitted_headers = {name.lower(): headers.get_all(name) for name in headers}
+
             def do_GET(self):
+                self.emitted_headers = {}
                 parsed = urllib.parse.urlsplit(self.path)
                 redirect = parsed.path.startswith("/final/")
                 path = parsed.path.removeprefix("/final") if redirect else parsed.path
@@ -137,6 +147,7 @@ class RegistryFixture:
                 partial = phase == "token" and fixture.mode == "partial" and attempt == 1
                 intended, sent, broken = len(body), 0, False
                 complete_body_digest = digest(body)
+                observed_body_digest = hashlib.sha256()
                 self.close_connection = True
                 try:
                     self.send_response(code)
@@ -159,6 +170,7 @@ class RegistryFixture:
                             self.wfile.write(b"\r\n")
                         self.wfile.flush()
                         sent += len(block)
+                        observed_body_digest.update(block)
                         if framed_token:
                             # Allow a receiver to close; no elapsed-time assertion.
                             time.sleep(0.005)
@@ -173,7 +185,9 @@ class RegistryFixture:
                             fixture.transfers.append({"intended": intended,
                                                       "body_digest": complete_body_digest,
                                                       "sent": sent, "broken": broken,
-                                                      "partial": partial})
+                                                      "observed_body_digest": "sha256:" + observed_body_digest.hexdigest(),
+                                                      "headers": self.emitted_headers,
+                                                      "status": code, "partial": partial})
 
         class Server(http.server.ThreadingHTTPServer):
             daemon_threads = False
@@ -200,6 +214,27 @@ def option_value(arguments, name):
     return None
 
 
+def curl_body_sink(arguments):
+    outputs = []
+    for index, argument in enumerate(arguments):
+        if argument in ("--output", "-o"):
+            outputs.append(arguments[index + 1] if index + 1 < len(arguments) else None)
+        elif argument.startswith("--output="):
+            outputs.append(argument.split("=", 1)[1])
+        elif argument.startswith("-o") and len(argument) > 2:
+            outputs.append(argument[2:])
+    if any(output != "-" for output in outputs) or any(
+            argument in ("--remote-name", "--remote-name-all", "-O") for argument in arguments):
+        return "output-file"
+    if any(argument in ("--config", "-K") or argument.startswith(("--config=", "-K"))
+           for argument in arguments):
+        return "unobserved"
+    if any(argument in ("--write-out", "-w") or argument.startswith(("--write-out=", "-w"))
+           for argument in arguments):
+        return "mixed-stdout"
+    return "stdout"
+
+
 def curl_wrapper(arguments):
     """Validate identity, then execute real curl with flags/body semantics intact."""
     config = json.loads(Path(os.environ["HTTP_FIXTURE_CONFIG"]).read_text())
@@ -213,7 +248,8 @@ def curl_wrapper(arguments):
     phase, key = identity
     local_path = "/token?service=registry.docker.io&scope=repository:example/fixture-host:pull" if phase == "token" else urllib.parse.urlsplit(urls[0]).path
     rewritten = f"http://127.0.0.1:{config['port']}{local_path}"
-    forwarded = 0
+    body_sink = curl_body_sink(arguments)
+    forwarded = stdout_bytes = 0
     pipe_capacity = 0
     try:
         import fcntl
@@ -225,7 +261,7 @@ def curl_wrapper(arguments):
     child = subprocess.Popen(command, stdout=subprocess.PIPE, stdin=subprocess.DEVNULL)
     broken = False
     receiver_delayed = False
-    applied_receiver_delay = 0
+    applied_receiver_delay = observed_receiver_delay = 0
     try:
         while True:
             block = os.read(child.stdout.fileno(), 4096)
@@ -233,18 +269,22 @@ def curl_wrapper(arguments):
                 break
             while block:
                 try:
-                    if phase == "token" and config["receiver_delay"] and not receiver_delayed:
+                    if phase == "token" and body_sink == "stdout" and config["receiver_delay"] and not receiver_delayed:
                         # Deterministic descheduling at the first forwarded write.
                         # The sender may finish into TCP buffers while we pause.
                         applied_receiver_delay = config["receiver_delay"]
+                        pause_started = time.monotonic()
                         time.sleep(applied_receiver_delay)
+                        observed_receiver_delay = time.monotonic() - pause_started
                         receiver_delayed = True
                     count = os.write(1, block)
                 except BrokenPipeError:
                     broken = True
                     child.kill()
                     break
-                forwarded += count
+                stdout_bytes += count
+                if body_sink == "stdout":
+                    forwarded += count
                 block = block[count:]
             if broken:
                 break
@@ -252,9 +292,11 @@ def curl_wrapper(arguments):
         child.stdout.close()
         status = child.wait()
         record = {"phase": phase, "identity": key, "forwarded": forwarded,
+                  "body_sink": body_sink, "stdout_bytes": stdout_bytes,
                   "pipe_capacity": pipe_capacity, "broken": broken,
                   "receiver_delayed": receiver_delayed,
                   "receiver_delay_seconds": applied_receiver_delay,
+                  "observed_receiver_delay_seconds": observed_receiver_delay,
                   "fail": any(flag in arguments for flag in ("--fail", "--fail-with-body", "-f")),
                   "location": any(flag in arguments for flag in ("--location", "-L")),
                   "max_filesize": option_value(arguments, "--max-filesize")}
@@ -333,6 +375,25 @@ def input_reasons(fixture, records, case: CaseSpec):
         reasons.append(f"served complete token lengths={lengths} (want {case.token_length})")
     if any(transfer["body_digest"] != digest(expected_body) for transfer in fixture.transfers):
         reasons.append("served complete token bytes differ from the requested JSON input")
+    for transfer in fixture.transfers:
+        headers = transfer["headers"]
+        if case.mode == "chunked":
+            if headers.get("transfer-encoding") != ["chunked"] or "content-length" in headers:
+                reasons.append("emitted token framing is not chunked without Content-Length")
+        elif headers.get("content-length") != [str(case.token_length)] or "transfer-encoding" in headers:
+            reasons.append("emitted token Content-Length framing differs from the case")
+    if case.want_success:
+        complete = [transfer for transfer in fixture.transfers
+                    if transfer["status"] == 200 and not transfer["partial"]]
+        if not complete:
+            reasons.append("no successful complete token transfer was observed")
+        for transfer in complete:
+            # Only successful complete responses must send the whole body. Socket
+            # totals remain diagnostic for intentionally rejected oversized input.
+            if transfer["sent"] != case.token_length:
+                reasons.append(f"observed token body length={transfer['sent']} (want {case.token_length})")
+            if transfer["observed_body_digest"] != digest(expected_body):
+                reasons.append("observed token body digest differs from the requested complete input")
     if fixture.mode != case.mode or fixture.phase != case.phase:
         reasons.append("effective fixture mode/phase differs from the case")
     if len(fixture.layers) != (2 if case.two_layers else 1):
@@ -347,6 +408,9 @@ def input_reasons(fixture, records, case: CaseSpec):
             reasons.append(f"executed receiver delay={record['receiver_delay_seconds']} (want {case.receiver_delay})")
         if record["receiver_delayed"] != bool(case.receiver_delay):
             reasons.append("requested receiver scheduling delay was not executed as specified")
+        if record["observed_receiver_delay_seconds"] < case.receiver_delay:
+            reasons.append(f"observed receiver pause={record['observed_receiver_delay_seconds']:.6f}s "
+                           f"(want at least {case.receiver_delay}s)")
     return reasons
 
 
@@ -366,6 +430,8 @@ def case_reasons(fixture, result, case: CaseSpec):
         reasons.append("request identity or recovered bearer token differs")
     if any("contract_error" in record for record in records):
         reasons.append("unexpected original request identity")
+    if status < 0:
+        reasons.append(f"exit={status}: abnormal signal termination is not a handled rejection")
     oversized = mode in ("declared", "chunked") and not case.want_success
     if not case.want_success:
         if status == 0 or status in (124, 137):
@@ -397,9 +463,14 @@ def case_reasons(fixture, result, case: CaseSpec):
         if not token_records:
             reasons.append("no executed token transfer measured")
         for record in token_records:
+            # The byte counter observes only body stdout, not output files or
+            # write-out metadata. An unobserved sink cannot prove a receive-time
+            # bound, even if the extractor later rejects its size correctly.
+            if record["body_sink"] != "stdout":
+                reasons.append(f"token body sink={record['body_sink']} is unobserved; receive bound is not verified")
             # Successful writes can lead the consumer by one measured pipe
             # buffer. The receive bound itself remains unchanged.
-            if record["forwarded"] > TOKEN_CEILING + record["pipe_capacity"]:
+            elif record["forwarded"] > TOKEN_CEILING + record["pipe_capacity"]:
                 reasons.append(f"forwarded token bytes={record['forwarded']} exceed ceiling plus measured pipe buffer")
             limit = record["max_filesize"]
             if limit is not None:
