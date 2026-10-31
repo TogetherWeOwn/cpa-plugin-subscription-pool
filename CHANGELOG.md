@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- `coexisting-plugins` coordinator key: plugin IDs the operator confirms register no Scheduler (provider-only plugins such as `synthetic`, `nvidia-nim`, `cloudflare-workers-ai`). Listed plugins may stay enabled alongside `subscription-pool` if they sort after it in host order (priority below 1000, or 1000 with a larger ID). Previously any other enabled plugin failed reconfigure with "must be the sole enabled scheduler plugin" and dropped every pool account. Unlisted enabled plugins still fail closed. A provider plugin that serves a pool module's provider ID needs that module disabled (`providers.<id>.enabled: false`).
+
 ## [0.7.0] - 2026-10-24
 
 ### Added
