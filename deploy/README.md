@@ -13,7 +13,7 @@ Run the tests with `python3 -m unittest discover -s deploy -p 'test_*.py'`. They
 ## Preconditions proved before host changes
 
 - The tagged v0.7.1 commit, registry bytes, and release checksums are recorded by the release artifact manifest; do not substitute a working-tree or untagged artifact.
-- The compatibility evidence (`.github/host-images.json`, packaged as `compatibility-evidence.json`) records the v7.2.150 baseline image digest. The deployed image digest is in `deploy/deployed-host-image.json`, and CI resolves the latest stock tag to a digest at run time.
+- The compatibility evidence records deployed, latest, and v7.2.150 baseline image digests and successful host checks.
 - `config.yaml.tmpl` follows `docs/ARCHITECTURE.md`: full-key pairing is rendered only on the host; `subscription-pool` is the sole enabled scheduler at priority `1000`.
 
 The release operator bundle is the source of truth for the exact commit, registry digest, compatibility evidence, live verifier, rollback script, and per-file modes. Verify its manifest and `checksums.txt` before using any command below.
