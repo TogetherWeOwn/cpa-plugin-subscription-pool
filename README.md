@@ -189,7 +189,7 @@ The matrix is maintained in three places:
 
 - the operator updates [`deploy/deployed-host-image.json`](deploy/deployed-host-image.json) immediately after a host deployment, recording the exact linux/amd64 manifest digest;
 - [`.github/host-images.json`](.github/host-images.json) keeps the schema-5-capable v7.2.150 baseline (moved from v7.2.67 under TOG-7425);
-- [`.github/scripts/resolve-host-images.sh`](.github/scripts/resolve-host-images.sh) queries Docker Hub on every run and resolves the highest semantic v7.2.x tag to an immutable linux/amd64 manifest digest.
+- [`.github/scripts/resolve-host-images.sh`](.github/scripts/resolve-host-images.sh) queries Docker Hub on every run and resolves the highest semantic `vX.Y.Z` tag (any major or minor version) to an immutable linux/amd64 manifest digest.
 
 For every image, CI loads the plugin, checks registration and all three advertised capabilities, sends real requests through the host scheduler, and requires HTTP `200` round trips for `zai/smoke-model` and `zai-openai/smoke-model` against an isolated TLS stub. Any `zai_unmanaged_candidate`, scheduler rejection, missing upstream request, or non-200 response fails the job. [`.github/workflows/host-compatibility.yml`](.github/workflows/host-compatibility.yml) holds the check. [`ci.yml`](.github/workflows/ci.yml) runs it as the `host-compat` job on pull requests (skipped for docs-only changes), on `main`, and daily at 07:17 UTC; it can also be dispatched by hand. A failed scheduled run creates a GitHub Actions notification; branch protection should require `ci-ok`, which fails if the host compatibility job fails, plus `pr-lint` and `secret-scan`.
 
@@ -260,7 +260,7 @@ The provider-specific settings below describe `providers.zai`; they are not defa
 | `plugins.enabled` | `false` | Global native-plugin switch; set it to `true`. |
 | `plugins.dir` | `plugins` | Native plugin root; Linux/amd64 libraries are loaded from `<dir>/linux/amd64/`. |
 | `enabled` | host default | Per-plugin enable switch under `plugins.configs.subscription-pool`. |
-| `priority` | `1000` required | Host-level scheduler priority. V0.1 also rejects any second enabled scheduler plugin. |
+| `priority` | `1000` required | Host-level scheduler priority. The plugin also rejects every other enabled plugin unless it is listed in `coexisting-plugins` (confirmed to register no Scheduler) and sorts after this plugin. |
 | `cpa-config-path` | `config.yaml` | CLIProxyAPI configuration used to discover exact credential pairs and `auth-dir`. |
 | `coexisting-plugins` | `[]` | Plugin IDs you confirm register **no** Scheduler (provider-only plugins, e.g. `nvidia-nim`). Only these may be enabled alongside `subscription-pool`, and each must sort after it (priority below `1000`, or `1000` with a larger ID). Any other enabled plugin fails reconfigure closed. A provider plugin that serves the same provider ID as a pool module needs that module disabled (`providers.<id>.enabled: false`). |
 | `quota-refresh-interval` | `2m` | Base poll interval; jittered polling accepts only `1m`–`3m`. |

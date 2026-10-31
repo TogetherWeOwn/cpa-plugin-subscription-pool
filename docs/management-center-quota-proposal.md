@@ -2,7 +2,7 @@
 
 ## Current integration and ABI findings
 
-The installed plugin is **Subscription Pool: Z.ai · OpenCode Go · synthetic.new** (stable ID `subscription-pool`, source `TogetherWeOwn/cpa-plugin-subscription-pool`). One coordinator hosts all three provider modules. The existing **Usage and Quota** resource menu already displays their usage, quota windows, health and Synthetic paid/infinite lanes together.
+The installed plugin is **Subscription Pool: Z.ai · OpenCode Go · synthetic.new** (stable ID `subscription-pool`, source `TogetherWeOwn/cpa-plugin-subscription-pool`). One coordinator hosts five provider modules (`zai`, `opencode-go`, `synthetic`, `cloudflare-workers-ai` and `nvidia-nim`); this proposal covers the first three. The existing **Usage and Quota** resource menu already displays their usage, quota windows, health and Synthetic paid/infinite lanes together.
 
 The plugin builds against CLIProxyAPI SDK **v7.2.154**, native ABI 1, registration schema 5. Verified against `sdk/pluginapi/types.go` and `internal/pluginhost/rpc_schema.go` of that tag:
 
@@ -24,7 +24,7 @@ Use authenticated `pluginsApi.list()`. When an enabled, registered plugin has ID
 GET /plugins/subscription-pool/status
 ```
 
-`apiClient` resolves this under `/v0/management` and supplies its existing Bearer management key. Status is an aggregate with `providers.zai`, `providers["opencode-go"]` and `providers.synthetic`. Missing, disabled or inactive modules produce no virtual entries; failure in one section must not hide the others. Do not discover `zai-coding-plan` or `opencode-go-pool` as installed plugins: their disabled legacy config entries are superseded.
+`apiClient` resolves this under `/v0/management` and supplies its existing Bearer management key. Status is an aggregate with one `providers` key per hosted module; this panel reads `providers.zai`, `providers["opencode-go"]` and `providers.synthetic`. Missing, disabled or inactive modules produce no virtual entries; failure in one section must not hide the others. Do not discover `zai-coding-plan` or `opencode-go-pool` as installed plugins: their disabled legacy config entries are superseded.
 
 The authenticated usage endpoint is an alternative shared presentation DTO:
 

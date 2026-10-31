@@ -16,8 +16,9 @@ Use the authenticated management JSON from:
 `managementAccountStatus`, not the internal account struct. The coordinator
 passes this JSON through; do not infer this contract from an HTML resource page,
 a health label, a quota reset, the aggregate timestamp, or another provider.
-A live aggregate status request can invoke provider polling (see OpenCode Go
-below). Do not describe it as side-effect-free or run it as an offline probe.
+Provider `Status` methods report cached state; quota polling runs in background
+loops started by reconfigure (see OpenCode Go below). A live status request
+still reads production state, so do not run it as an offline probe.
 
 ## Fields
 
@@ -152,10 +153,11 @@ integration evidence; a helper's nonzero exit must not be assumed write-free.
 
 ## OpenCode Go is not this contract
 
-`internal/providers/opencodego/module.go`, `Module.Status`, first calls
-`pollUsageOnce(ctx)` and later refreshes account windows. It is **not a pure
-read**: with configured dashboard credentials it can make network requests and
-update quota state. Offline contract tests use synthetic state/clients only.
+`internal/providers/opencodego/module.go`, `Module.Status`, reports cached
+window state only and never polls. Polling runs in the background `pollLoop`,
+which `Reconfigure` starts when a dashboard key is configured; that loop makes
+network requests with the key and updates quota state. Offline contract tests
+use synthetic state/clients only.
 
 Its serialized window fields include `known`, `exhausted`, optional `resets_at`,
 `source`, and `authoritative`; it does not export the internal `CooldownAt`, the
