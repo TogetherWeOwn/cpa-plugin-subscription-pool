@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
@@ -178,10 +179,15 @@ func loadHostCPAConfig(path string) (hostCPAConfig, error) {
 }
 
 // validateSchedulerDeployment enforces the host-level rule that this plugin
-// must be the sole enabled scheduler plugin: CLIProxyAPI's scheduler slot
-// runs only the first active scheduler plugin by priority desc, ID asc, and
-// silently ignores the rest, so a second enabled scheduler plugin would
-// blend or lose quota domains without any error ever surfacing.
+// must be the scheduler CLIProxyAPI actually consults. The host's scheduler
+// slot runs only the FIRST active plugin that registers a Scheduler, ordered by
+// priority desc, then plugin ID asc (internal/pluginhost/snapshot.go sortRecords,
+// internal/pluginhost/scheduler.go schedulerRecord), and silently ignores the
+// rest. Other enabled plugins are therefore safe exactly when none of them can
+// sort ahead of this one: provider plugins (auth/model/executor/quota only, no
+// Scheduler) at the default priority 0 coexist, while any plugin that could
+// outrank this one is rejected because a Scheduler it registers would win
+// silently. Capabilities are not visible from config, so ordering is the check.
 func validateSchedulerDeployment(plugins pluginsProjection) error {
 	if !plugins.Enabled {
 		return fmt.Errorf("plugins must be enabled")
@@ -193,11 +199,28 @@ func validateSchedulerDeployment(plugins pluginsProjection) error {
 	if item.Priority != requiredPluginPriority {
 		return fmt.Errorf("%s priority must be %d", PluginID, requiredPluginPriority)
 	}
-	for id, configured := range plugins.Configs {
+	ids := make([]string, 0, len(plugins.Configs))
+	for id := range plugins.Configs {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		configured := plugins.Configs[id]
 		if id == PluginID || configured.Enabled == nil || !*configured.Enabled {
 			continue
 		}
-		return fmt.Errorf("%s must be the sole enabled scheduler plugin; disable %s", PluginID, id)
+		if outranksInHostOrder(id, configured.Priority, PluginID, item.Priority) {
+			return fmt.Errorf("%s must be the first scheduler in host order; plugin %s (priority %d) would be consulted first: give it a priority below %d or disable it", PluginID, id, configured.Priority, requiredPluginPriority)
+		}
 	}
 	return nil
+}
+
+// outranksInHostOrder mirrors the host's record ordering: higher priority
+// first, ties broken by ascending plugin ID.
+func outranksInHostOrder(id string, priority int, selfID string, selfPriority int) bool {
+	if priority != selfPriority {
+		return priority > selfPriority
+	}
+	return id < selfID
 }
