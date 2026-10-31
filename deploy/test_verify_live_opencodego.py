@@ -7,6 +7,9 @@ import textwrap
 import time
 import unittest
 
+import hermetic
+from hermetic import tearDownModule  # noqa: F401  (fails the module on a bypassed stub)
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "deploy" / "verify-live-opencodego.sh"
 

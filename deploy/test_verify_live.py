@@ -6,6 +6,9 @@ import textwrap
 import time
 import unittest
 
+import hermetic
+from hermetic import tearDownModule  # noqa: F401  (fails the module on a bypassed stub)
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "deploy" / "verify-live.sh"
 
@@ -34,7 +37,7 @@ class VerifyLiveTest(unittest.TestCase):
         container="cliproxy-test",
         log_command=None,
         snapshot_only=False,
-        dashboard_url="http://127.0.0.1/dashboard",
+        dashboard_url=hermetic.ORIGIN + "/dashboard",
         collector_fails=False,
         status_extra_accounts=None,
     ):

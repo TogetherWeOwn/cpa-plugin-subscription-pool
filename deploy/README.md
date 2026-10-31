@@ -6,6 +6,10 @@ v0.7.0 adds Cloudflare Workers AI and NVIDIA NIM guards and Usage and Quota card
 
 For retired-plugin cleanup, GET and back up the full `plugins` section, require `zai-coding-plan` and `opencode-go-pool` to be disabled, then PUT the complete section without those two **config entries**. Retain both legacy `.so` files for rollback. Do not delete similarly named OpenAI-compatible provider entries or Z.ai's module API routes. Compare `/v1/models` before and after, and synchronize the live config to the host through the established in-place backup/verification procedure.
 
+## Testing the deploy scripts
+
+Run the tests with `python3 -m unittest discover -s deploy -p 'test_*.py'`. They never touch live CLIProxy: `deploy/hermetic.py` sets `CLIPROXY_TEST_MANAGEMENT_ORIGIN` to an in-process tripwire on an ephemeral port, and while it is set the scripts refuse the live origin. Never run `verify-live*.sh` or `rollback.sh` against live CLIProxy from an agent or test run. Five wrong or missing management keys ban every caller on the host from the management API for 30 minutes, and the scripts' unauthenticated `401` probe counts as one of them.
+
 ## Preconditions proved before host changes
 
 - The tagged v0.7.0 commit, registry bytes, and release checksums are recorded by the release artifact manifest; do not substitute a working-tree or untagged artifact.
