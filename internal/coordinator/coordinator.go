@@ -188,7 +188,8 @@ func (c *Coordinator) validationStatus() string {
 // pick implements the 6 dispatch invariants documented in
 // internal/providermodule.Module: every module's Recognize is consulted
 // before any Pick is called, zero recognizing modules yields Handled:false,
-// more than one recognizing module fails closed, and a recognized module's
+// more than one recognizing module, or one recognizing only some of the
+// candidates, fails closed, and a recognized module's
 // own Pick result (including its unmanaged/no-capacity errors) is
 // propagated verbatim.
 func (c *Coordinator) pick(req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
@@ -200,18 +201,29 @@ func (c *Coordinator) pick(req pluginapi.SchedulerPickRequest) (pluginapi.Schedu
 	}
 
 	var recognizing []moduleEntry
+	var recognized []int
 	for _, entry := range c.modules {
+		count := 0
 		for _, candidate := range req.Candidates {
 			if entry.module.Recognize(candidate) {
-				recognizing = append(recognizing, entry)
-				break
+				count++
 			}
+		}
+		if count > 0 {
+			recognizing = append(recognizing, entry)
+			recognized = append(recognized, count)
 		}
 	}
 	switch len(recognizing) {
 	case 0:
 		return pluginapi.SchedulerPickResponse{Handled: false}, nil
 	case 1:
+		// A module only owns the pick when it owns every candidate. Declining
+		// here would let the host's scheduler choose a managed lane without
+		// the module's guards, so a partial match fails closed instead.
+		if recognized[0] != len(req.Candidates) {
+			return pluginapi.SchedulerPickResponse{}, fmt.Errorf("coordinator_mixed_provider_pick: %s recognizes %d of %d candidates", recognizing[0].id, recognized[0], len(req.Candidates))
+		}
 		return recognizing[0].module.Pick(context.Background(), req)
 	default:
 		ids := make([]string, 0, len(recognizing))

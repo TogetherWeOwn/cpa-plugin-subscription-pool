@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- Scheduler picks fail closed when one provider module recognizes only some of the candidates (`coordinator_mixed_provider_pick`). Cloudflare in `stayWithinIncluded` mode (`cloudflare_no_capacity: foreign_candidate`) and synthetic with a paid credential in the set (`synthetic_foreign_candidate`) also refuse such sets themselves instead of declining.
+
 ## [0.7.1] - 2026-10-31
 
 ### Added

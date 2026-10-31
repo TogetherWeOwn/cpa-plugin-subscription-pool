@@ -396,8 +396,9 @@ func (m *Module) OwnedAuthIDs(context.Context) []string {
 //  3. otherwise a 429-coded rejection, so the request never spills into
 //     usage-based billing and never trips the host's own cooldowns.
 //
-// Candidates belonging to another provider make the pick ambiguous, so the
-// module declines (Handled:false) and the host's scheduler decides.
+// Candidates belonging to another provider make the pick ambiguous. With a
+// paid credential among them the module fails closed; otherwise it declines
+// (Handled:false) and the host's scheduler decides.
 func (m *Module) Pick(_ context.Context, req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
 	now := requestTime(req, m.clock())
 	m.mu.Lock()
@@ -406,10 +407,12 @@ func (m *Module) Pick(_ context.Context, req pluginapi.SchedulerPickRequest) (pl
 		return pluginapi.SchedulerPickResponse{Handled: false}, nil
 	}
 	var paid, infinite []*lane
+	foreign := false
 	for _, candidate := range req.Candidates {
 		kind, ok := m.kindOfLocked(candidate)
 		if !ok {
-			return pluginapi.SchedulerPickResponse{Handled: false}, nil
+			foreign = true
+			continue
 		}
 		item := m.laneForCandidateLocked(candidate, kind)
 		if kind == kindPaid {
@@ -418,7 +421,13 @@ func (m *Module) Pick(_ context.Context, req pluginapi.SchedulerPickRequest) (pl
 			infinite = append(infinite, item)
 		}
 	}
-	if len(paid) == 0 && len(infinite) == 0 {
+	if foreign && len(paid) > 0 {
+		// Declining would let the host's scheduler pick a paid lane with no
+		// threshold check, so a paid lane mixed with a foreign one is refused.
+		m.routing.Rejections++
+		return pluginapi.SchedulerPickResponse{}, newSchedulerError("synthetic_foreign_candidate", "candidates mix synthetic.new paid credentials with another provider")
+	}
+	if foreign || (len(paid) == 0 && len(infinite) == 0) {
 		return pluginapi.SchedulerPickResponse{Handled: false}, nil
 	}
 	sortLanes(paid)

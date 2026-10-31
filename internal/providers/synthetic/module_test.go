@@ -321,9 +321,17 @@ func TestInfiniteConcurrencyCap(t *testing.T) {
 	}
 }
 
-func TestForeignCandidateDeclines(t *testing.T) {
+func TestForeignCandidateWithPaidLaneFailsClosed(t *testing.T) {
 	m, _ := newTestModule(t, "{}")
 	resp, err := m.Pick(context.Background(), pickReq(true, candidate(paidAuthID, "synthetic"), candidate("openai-compatibility:opencode-go:x", "opencode-go")))
+	if err == nil || resp.Handled || !strings.Contains(err.Error(), "synthetic_foreign_candidate") {
+		t.Fatalf("mixed Pick = %+v, %v; want synthetic_foreign_candidate", resp, err)
+	}
+}
+
+func TestForeignCandidateWithInfiniteLaneDeclines(t *testing.T) {
+	m, _ := newTestModule(t, "{}")
+	resp, err := m.Pick(context.Background(), pickReq(true, candidate(infiniteAuthID, "synthetic-infinite"), candidate("openai-compatibility:opencode-go:x", "opencode-go")))
 	if err != nil || resp.Handled {
 		t.Fatalf("mixed Pick = %+v, %v; want Handled:false", resp, err)
 	}

@@ -126,6 +126,24 @@ func TestCoordinatorPickMixedProvidersFailsClosed(t *testing.T) {
 	}
 }
 
+// A module that recognizes only some of the candidates fails closed rather
+// than declining, so the host's scheduler never picks its lanes unguarded.
+func TestCoordinatorPickPartialRecognitionFailsClosed(t *testing.T) {
+	picked := false
+	alpha := &fakeModule{id: "alpha", recognize: recognizeID("alpha-"), pick: func(pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
+		picked = true
+		return pluginapi.SchedulerPickResponse{Handled: false}, nil
+	}}
+	c := New(alpha)
+	resp, err := c.pick(pluginapi.SchedulerPickRequest{Candidates: []pluginapi.SchedulerAuthCandidate{{ID: "alpha-1"}, {ID: "other-auth"}}})
+	if err == nil || resp.Handled || !strings.Contains(err.Error(), "coordinator_mixed_provider_pick") {
+		t.Fatalf("pick() = %#v, %v; want coordinator_mixed_provider_pick", resp, err)
+	}
+	if picked {
+		t.Fatal("pick() called Pick on a module that does not own every candidate")
+	}
+}
+
 // A single recognizing module's Pick result (success or error) propagates
 // verbatim — this also covers invariant 5 (recognized-but-unmanaged/
 // all-impaired fails closed via the module's own error, not a coordinator
