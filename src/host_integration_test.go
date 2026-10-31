@@ -454,8 +454,9 @@ func addUnlistedPlugin(t *testing.T, cpaConfigPath string) {
 
 // requireRejectedSchedulerFailsClosed asserts the plugin is still the host's
 // registered scheduler and hard-fails candidate rather than letting CPA's
-// native scheduler route it, while unrelated candidates stay unhandled.
-func requireRejectedSchedulerFailsClosed(t *testing.T, host *pluginhost.Host, candidate pluginapi.SchedulerAuthCandidate) {
+// native scheduler route it. Unrelated candidates stay unhandled once a
+// config was accepted, and fail closed as well when none ever was.
+func requireRejectedSchedulerFailsClosed(t *testing.T, host *pluginhost.Host, candidate pluginapi.SchedulerAuthCandidate, everAccepted bool) {
 	t.Helper()
 	if !host.HasScheduler() {
 		t.Fatal("rejected config withdrew the scheduler; CPA would route guarded credentials natively")
@@ -472,6 +473,12 @@ func requireRejectedSchedulerFailsClosed(t *testing.T, host *pluginhost.Host, ca
 		t.Fatalf("pick of a guarded candidate = handled %v, err %v; want the config-rejected scheduler error", handled, err)
 	}
 	resp, handled, err := host.PickAuth(context.Background(), pluginapi.SchedulerPickRequest{Candidates: []pluginapi.SchedulerAuthCandidate{{ID: "claude:unrelated", Provider: "claude"}}})
+	if !everAccepted {
+		if err == nil || !strings.Contains(err.Error(), "plugin configuration was rejected") {
+			t.Fatalf("pick of an unrelated candidate before any accepted config = %#v, handled %v, err %v; want the config-rejected scheduler error", resp, handled, err)
+		}
+		return
+	}
 	if err != nil || handled || resp.Handled {
 		t.Fatalf("pick of an unrelated candidate = %#v, handled %v, err %v; want unhandled", resp, handled, err)
 	}
@@ -490,7 +497,7 @@ func TestRejectedReconfigureKeepsSchedulerFailClosed(t *testing.T) {
 
 	addUnlistedPlugin(t, cpaConfigPath)
 	apply()
-	requireRejectedSchedulerFailsClosed(t, host, pluginapi.SchedulerAuthCandidate{ID: authIDs[0]})
+	requireRejectedSchedulerFailsClosed(t, host, pluginapi.SchedulerAuthCandidate{ID: authIDs[0]}, true)
 
 	writeSrcCPAConfigFixture(t, cpaConfigPath, authDir, fixtureKey)
 	apply()
@@ -508,9 +515,9 @@ func TestRejectedRegisterKeepsSchedulerFailClosed(t *testing.T) {
 	addUnlistedPlugin(t, cpaConfigPath)
 	host, _ := hostWithPlugin(t, root, cpaConfigPath, authDir)
 
-	// No config was ever accepted, so the registry is empty; the zai module
-	// still recognizes its own family by provider attributes.
-	requireRejectedSchedulerFailsClosed(t, host, pluginapi.SchedulerAuthCandidate{ID: "zai-auth", Provider: "zai-coding-plan", Attributes: map[string]string{"compat_name": "zai-coding-plan"}})
+	// No config was ever accepted, so no module knows its credentials and
+	// every pick, guarded or not, fails closed.
+	requireRejectedSchedulerFailsClosed(t, host, pluginapi.SchedulerAuthCandidate{ID: "zai-auth", Provider: "zai-coding-plan", Attributes: map[string]string{"compat_name": "zai-coding-plan"}}, false)
 }
 
 // pluginConfigNode builds the plugin's own config_yaml node: only

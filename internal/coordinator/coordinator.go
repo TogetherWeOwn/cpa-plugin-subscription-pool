@@ -44,9 +44,14 @@ type Coordinator struct {
 	mu      sync.RWMutex
 	lastErr error
 	stopped bool
+	// accepted is set once a configuration has been fully applied. Until
+	// then no module knows which credentials it owns, so rejected mode
+	// fails every pick closed.
+	accepted bool
 	// hostOwned holds the auth IDs the latest readable host config gives
 	// the HostCredentialOwner modules. Rejected mode blocks them as well,
-	// so they stay guarded before any configuration was accepted.
+	// so credentials added to the CPA config alongside a rejected plugin
+	// config stay guarded.
 	hostOwned map[string]struct{}
 
 	registry registry
@@ -238,6 +243,7 @@ func (c *Coordinator) reconfigure(rawConfig []byte) error {
 	if !c.stopped {
 		c.lastErr = nil
 	}
+	c.accepted = true
 	c.mu.Unlock()
 	return nil
 }
@@ -308,12 +314,17 @@ func (c *Coordinator) pick(req pluginapi.SchedulerPickRequest) (pluginapi.Schedu
 	c.commitMu.RLock()
 	defer c.commitMu.RUnlock()
 	c.mu.RLock()
-	stopped, rejected, hostOwned := c.stopped, c.lastErr, c.hostOwned
+	stopped, rejected, accepted, hostOwned := c.stopped, c.lastErr, c.accepted, c.hostOwned
 	c.mu.RUnlock()
 	if stopped {
 		return pluginapi.SchedulerPickResponse{}, fmt.Errorf("plugin is shutting down")
 	}
 	if rejected != nil {
+		if !accepted {
+			// No configuration was ever accepted: modules recognize
+			// nothing, so no candidate can be shown to be unguarded.
+			return pluginapi.SchedulerPickResponse{}, &configRejectedError{reason: rejected.Error()}
+		}
 		return c.pickRejected(req, rejected, hostOwned)
 	}
 
@@ -341,7 +352,7 @@ func (c *Coordinator) pick(req pluginapi.SchedulerPickRequest) (pluginapi.Schedu
 }
 
 // pickRejected answers picks while the most recent configuration is
-// rejected. The plugin stays registered as the host's scheduler, and every
+// rejected after an earlier one was accepted. The plugin stays registered as the host's scheduler, and every
 // candidate a hosted module recognizes, that the last accepted registry
 // owned, or that the host config gives a HostCredentialOwner module, gets a
 // hard error. Only requests with none of those keep Handled:false, so

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,6 +14,8 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 
 	"github.com/TogetherWeOwn/cpa-plugin-subscription-pool/internal/providermodule"
+	"github.com/TogetherWeOwn/cpa-plugin-subscription-pool/internal/providers/cloudflare"
+	"github.com/TogetherWeOwn/cpa-plugin-subscription-pool/internal/providers/nvidianim"
 	"github.com/TogetherWeOwn/cpa-plugin-subscription-pool/internal/providers/opencodego"
 	"github.com/TogetherWeOwn/cpa-plugin-subscription-pool/internal/providers/synthetic"
 	"github.com/TogetherWeOwn/cpa-plugin-subscription-pool/internal/providers/zai"
@@ -341,8 +344,64 @@ func TestRejectedFirstConfigFailsClosedForHostZaiAuthIDs(t *testing.T) {
 			t.Fatalf("Pick(bare %q) error = %v, want coordinator_config_rejected", id, err)
 		}
 	}
-	resp, err := c.Pick(pluginapi.SchedulerPickRequest{Candidates: []pluginapi.SchedulerAuthCandidate{{ID: "unrelated-auth"}}})
-	if err != nil || resp.Handled {
-		t.Fatalf("Pick(unrelated) = %+v, %v, want Handled:false", resp, err)
+}
+
+// Before any configuration is accepted no module recognizes anything, so
+// whatever the cause of the rejection, every pick fails closed: a candidate
+// can never be shown to be unguarded and fall through to the host.
+func TestRejectedFirstConfigFailsEveryPickClosed(t *testing.T) {
+	writeCPA := func(t *testing.T, authDir, extraPlugin string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		raw := "auth-dir: " + authDir + "\nplugins:\n  enabled: true\n  configs:\n    subscription-pool:\n      enabled: true\n      priority: 1000\n" + extraPlugin
+		if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	causes := map[string]func(t *testing.T) string{
+		"parse error": func(t *testing.T) string { return "providers: [\n" },
+		"unreadable CPA config": func(t *testing.T) string {
+			return "cpa-config-path: " + filepath.Join(t.TempDir(), "missing.yaml") + "\n"
+		},
+		"non-coexisting plugin": func(t *testing.T) string {
+			return "cpa-config-path: " + writeCPA(t, filepath.Join(t.TempDir(), "auth"), "    other-scheduler:\n      enabled: true\n      priority: 10\n") + "\n"
+		},
+		"bad auth dir": func(t *testing.T) string {
+			file := filepath.Join(t.TempDir(), "not-a-dir")
+			if err := os.WriteFile(file, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return "cpa-config-path: " + writeCPA(t, file, "") + "\n"
+		},
+	}
+	candidates := []pluginapi.SchedulerAuthCandidate{
+		{ID: "bare-auth-id"},
+		{ID: "zai-auth", Provider: "zai-coding-plan", Attributes: map[string]string{"compat_name": "zai-coding-plan"}},
+		{ID: "ocg-auth", Provider: "opencode-go"},
+		{ID: "syn-auth", Provider: "openai-compatible-synthetic", Attributes: map[string]string{"compat_name": "synthetic"}},
+		{ID: "cf-auth", Provider: "openai-compatible-cloudflare-workers-ai", Attributes: map[string]string{"compat_name": "cloudflare-workers-ai"}},
+		{ID: "nim-auth", Provider: "openai-compatible-nvidia-nim", Attributes: map[string]string{"compat_name": "nvidia-nim"}},
+	}
+	for name, config := range causes {
+		t.Run(name, func(t *testing.T) {
+			modules := []providermodule.Module{zai.NewModule(), opencodego.NewModule(), synthetic.NewModule(), cloudflare.NewModule(), nvidianim.NewModule()}
+			defer func() {
+				for _, module := range modules {
+					_ = module.Close(context.Background())
+				}
+			}()
+			c := New(modules...)
+			if err := c.Reconfigure([]byte(config(t))); err == nil {
+				t.Fatal("Reconfigure = nil error, want rejection")
+			}
+			for _, candidate := range candidates {
+				resp, err := c.Pick(pluginapi.SchedulerPickRequest{Candidates: []pluginapi.SchedulerAuthCandidate{candidate}})
+				var rejected *configRejectedError
+				if !errors.As(err, &rejected) {
+					t.Fatalf("Pick(%s) = %+v, %v; want coordinator_config_rejected", candidate.ID, resp, err)
+				}
+			}
+		})
 	}
 }

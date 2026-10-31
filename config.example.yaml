@@ -107,9 +107,9 @@ plugins:
       cpa-config-path: /app/config.yaml
       # Plugin IDs you confirm register no Scheduler (provider-only plugins).
       # Any other enabled plugin makes reconfigure fail closed. A rejected
-      # config keeps the plugin registered: guarded picks fail with
-      # coordinator_config_rejected and status reports reconfigure_rejected
-      # until a valid config is reloaded.
+      # config keeps the plugin registered: guarded picks (every pick, if no
+      # config was ever accepted) fail with coordinator_config_rejected and
+      # status reports reconfigure_rejected until a valid config is reloaded.
       # coexisting-plugins: [synthetic]
       providers:
         nvidia-nim:
