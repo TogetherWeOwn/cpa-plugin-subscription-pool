@@ -2,7 +2,7 @@
 
 ## Purpose
 
-`subscription-pool` (repository `cpa-plugin-subscription-pool`, formerly `cpa-plugin-zai-coding-plan`) is a native CLIProxyAPI (CPA) plugin. It is a neutral coordinator that hosts one or more provider modules behind a single CPA scheduler/usage-plugin slot; today it hosts three: `zai`, `opencode-go`, and `synthetic`. The `zai` module makes a pool of Z.ai GLM Coding Plan subscriptions behave as quota-aware logical accounts across CPA's Anthropic and OpenAI-compatible lanes; `opencode-go` pools OpenCode Go accounts; `synthetic` schedules synthetic.new paid credits with fallback to the free infinite mode.
+`subscription-pool` (repository `cpa-plugin-subscription-pool`, formerly `cpa-plugin-zai-coding-plan`) is a native CLIProxyAPI (CPA) plugin. It is a neutral coordinator that hosts one or more provider modules behind a single CPA scheduler/usage-plugin slot; today it hosts five: `zai`, `opencode-go`, `synthetic`, `cloudflare-workers-ai`, and `nvidia-nim`. The `zai` module makes a pool of Z.ai GLM Coding Plan subscriptions behave as quota-aware logical accounts across CPA's Anthropic and OpenAI-compatible lanes; `opencode-go` pools OpenCode Go accounts; `synthetic` schedules synthetic.new paid credits with fallback to the free infinite mode; `cloudflare-workers-ai` and `nvidia-nim` guard the Cloudflare Workers AI and NVIDIA NIM lanes.
 
 Version 0.1 (zai module):
 
@@ -15,7 +15,7 @@ The plugin does not proxy inference, rewrite requests, or mint credentials. The 
 
 ## Published identity and management integration
 
-The registered display name is **Subscription Pool: Z.ai · OpenCode Go · synthetic.new**. The host-facing ID remains `subscription-pool`, independently of `Metadata.Name`; library filenames, config keys, state directories, model aliases and API routes do not change with branding. `Metadata.Logo` is a base64 SVG data URI embedded from `src/logo.svg`, so rendering makes no external asset request. The registry and the existing **Usage and Quota** resource menu describe all three providers.
+The registered display name is **Subscription Pool: Z.ai · OpenCode Go · synthetic.new**. The host-facing ID remains `subscription-pool`, independently of `Metadata.Name`; library filenames, config keys, state directories, model aliases and API routes do not change with branding. `Metadata.Logo` is a base64 SVG data URI embedded from `src/logo.svg`, so rendering makes no external asset request. The registry and the existing **Usage and Quota** resource menu describe all five providers.
 
 SDK v7.2.154's metadata has no description field and its capabilities have no quota provider. `supports_quota` therefore remains false; no unsupported quota RPCs are advertised. The patched v8 host's newer quota-provider contract needs a separate SDK/handler compatibility change. See [the three-provider Management Center proposal](management-center-quota-proposal.md) for the verified ABI fields, current menu integration and native-bridge requirements.
 
@@ -124,7 +124,7 @@ Version 0.1 implements:
 
 The plugin uses `pluginabi.MethodHostLog` only for structured redacted logs. A background quota client performs bounded HTTPS GETs to Z.AI's documented monitor endpoint outside scheduler critical sections. It authenticates with the paired plan key, redacts all request/response diagnostics, applies timeouts and response-size limits, and jitter-polls each account every one to three minutes.
 
-Registration advertises schema version 1 and the `scheduler`, `usage_plugin`, and `management_api` capabilities.
+Registration advertises `pluginabi.SchemaVersion` (5 in SDK v7.2.154) and the `scheduler`, `scheduler_across_priorities`, `usage_plugin`, and `management_api` capabilities.
 
 ## Module layout
 
@@ -142,8 +142,9 @@ The coordinator/provider split gives each provider module a compiler-enforced pr
 ├── src/
 │   ├── plugin.go             # envelope/wire-error types, plugin registration metadata
 │   ├── plugin_linux.go       # C ABI init/call/free/shutdown
-│   └── runtime_state.go      # var runtimeState = coordinator.New(zai, opencodego, synthetic)
+│   └── runtime_state.go      # var runtimeState = coordinator.New(zai, opencodego, synthetic, cloudflare, nvidianim)
 ├── internal/
+│   ├── abiclient/            # test-only cgo client that drives the built .so over the host C ABI
 │   ├── providermodule/
 │   │   └── interface.go      # Module interface + HostConfig; the coordinator/provider boundary
 │   ├── coordinator/
@@ -164,11 +165,14 @@ The coordinator/provider split gives each provider module a compiler-enforced pr
 │   │   ├── management.go     # zai's own management routes/handlers
 │   │   └── runtime.go        # zai runtime state machine
 │   ├── providers/opencodego/ # OpenCode Go quota-aware pooling
+│   ├── providers/cloudflare/ # Cloudflare Workers AI free-allocation guard
+│   ├── providers/nvidianim/  # NVIDIA NIM free-use guard
 │   ├── providers/synthetic/
 │   │   ├── module.go         # paid/infinite lanes, threshold + concurrency scheduling, usage learning, status
 │   │   ├── quota.go          # GET /v2/quotas and x-synthetic-quotas parsing
 │   │   ├── labels.go         # public ordinal lane names, persisted per credential
 │   │   └── config.go         # providers.synthetic schema
+│   ├── usage/                # coordinator-owned usage ledger
 │   ├── securestore/          # generic 0700/0600, symlink-rejecting, atomic-replace storage
 │   └── testfixture/          # shared CPA config fixture builder for tests
 ├── config.example.yaml
@@ -243,7 +247,7 @@ plugins:
 
 | Field | Default | Rule |
 |---|---:|---|
-| `priority` | `1000` | Host-level `PluginInstanceConfig` field, not plugin payload. V0.1 requires this plugin to be the only enabled scheduler; the high value makes accidental lower-priority schedulers non-winning but is not a substitute for exclusivity validation. |
+| `priority` | none; must be `1000` | Host-level `PluginInstanceConfig` field, not plugin payload. Any other value, including an omitted one, is rejected. Every other enabled plugin is rejected unless it is listed in `coexisting-plugins` (confirmed to register no Scheduler) and sorts after this plugin; the high value makes accidental lower-priority schedulers non-winning but is not a substitute for exclusivity validation. |
 | `cpa-config-path` | `config.yaml` | Host config path readable by the plugin. |
 | `providers.zai.quota-refresh-interval` | `2m` | Base jittered interval; accept only one to three minutes in v0.1. |
 | `providers.zai.authoritative-max-age` | `5m` | Maximum age for scheduling from the last successful quota response before switching to the estimator. Must exceed the maximum jittered poll interval. |
@@ -463,12 +467,12 @@ The coordinator namespaces all on-disk state under its own plugin ID, then gives
     │   └── settings.recovery.json  # transient during settings commit recovery
     ├── synthetic/
     │   └── lane-labels.state       # auth ID -> public lane ordinal; server-side only
-    └── opencode-go/                # reserved, empty stub — no module implemented yet
+    └── <provider-id>/              # created empty for every hosted module; modules add their own files
 ```
 
 `manifest.json` records which providers are currently registered and when; the in-memory dispatch registry, rebuilt from every live module's `OwnedAuthIDs()` on each reconfigure, remains the sole source of truth for dispatch — the manifest is never consulted to make a routing decision. Manifest write failures are soft (logged, never fail `Reconfigure`).
 
-`internal/securestore` implements the durable-storage primitives once, generically, and both the coordinator (for `manifest.json` and the `providers/opencode-go` stub) and the zai module (for its own `providers/zai/*`) use it as a library rather than reimplementing it:
+`internal/securestore` implements the durable-storage primitives once, generically, and both the coordinator (for `manifest.json` and the per-module `providers/<id>` directories) and the zai module (for its own `providers/zai/*`) use it as a library rather than reimplementing it:
 
 - directory mode `0700`;
 - files mode `0600`, including replacements;
@@ -579,7 +583,7 @@ Coordinator/dispatch coverage (`internal/coordinator`):
 - zero recognizing modules returns `Handled:false`; more than one recognizing module fails closed with `coordinator_mixed_provider_pick`;
 - usage dispatch resolves strictly through the registry by auth ID, never a self-reported provider field;
 - a recognized-but-unmanaged or all-impaired pick propagates the owning module's own hard error verbatim, never a silent `Handled:false`;
-- manifest write and empty provider stub-dir (`providers/opencode-go`) creation, and idempotence across repeated reconfigures.
+- manifest write and per-module provider directory (`providers/<id>`) creation, and idempotence across repeated reconfigures.
 
 ABI/integration coverage:
 

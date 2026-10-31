@@ -25,9 +25,9 @@ Do not include a live Z.AI plan key, CLIProxyAPI management key, authorization h
 ## Security boundaries
 
 - A plan key is paired in memory across the Anthropic and OpenAI-compatible CLIProxyAPI entries. It must never appear in status, logs, errors, filenames, persistent state, or tests.
-- Plugin state is stored under `<auth-dir>/zai-coding-plan/`; the directory must be mode `0700` and files mode `0600`. Atomic replacements must retain those permissions and reject symlink targets.
+- Plugin state is stored under `<auth-dir>/subscription-pool/` (Z.ai state in `providers/zai/`); directories must be mode `0700` and files mode `0600`. Atomic replacements must retain those permissions and reject symlink targets.
 - Z.AI quota polling uses the corresponding plan key only for the documented HTTPS quota endpoint. Responses and errors are bounded and treated as untrusted input.
-- Management endpoints are mounted beneath `/v0/management` and rely on CLIProxyAPI's management-key authentication. The plugin does not expose an unauthenticated status route.
+- Management endpoints are mounted beneath `/v0/management` and rely on CLIProxyAPI's management-key authentication. The **Usage and Quota** resource routes (`/v0/resource/plugins/subscription-pool/status` and `usage.json`) are unauthenticated by host design and serve only redacted usage data: no keys, fingerprints, auth IDs or free-text errors.
 - `unblock` clears transient health flags but must recompute retained quota/usage and cannot create capacity.
 - Native `.so` files execute inside CLIProxyAPI. Install only assets from a reviewed tagged release after checking `checksums.txt`.
 

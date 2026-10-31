@@ -13,7 +13,7 @@ Run the tests with `python3 -m unittest discover -s deploy -p 'test_*.py'`. They
 ## Preconditions proved before host changes
 
 - The tagged v0.7.0 commit, registry bytes, and release checksums are recorded by the release artifact manifest; do not substitute a working-tree or untagged artifact.
-- The compatibility evidence records deployed, latest, and v7.2.150 baseline image digests and successful host checks.
+- The compatibility evidence (`.github/host-images.json`, packaged as `compatibility-evidence.json`) records the v7.2.150 baseline image digest. The deployed image digest is in `deploy/deployed-host-image.json`, and CI resolves the latest stock tag to a digest at run time.
 - `config.yaml.tmpl` follows `docs/ARCHITECTURE.md`: full-key pairing is rendered only on the host; `subscription-pool` is the sole enabled scheduler at priority `1000`.
 
 The release operator bundle is the source of truth for the exact commit, registry digest, compatibility evidence, live verifier, rollback script, and per-file modes. Verify its manifest and `checksums.txt` before using any command below.
@@ -80,7 +80,8 @@ Compatibility note: v0.7.0 builds against SDK v7.2.154 (ABI 1, schema 5).
 Hosts that accept only schema 1, including the old v7.2.67 baseline, cannot
 load it; do not install v0.7.0 on them. Release CI runs the exact-image host
 matrix on the deployed evidence image (stock v7.2.151), the latest stock image,
-and the v7.2.150 baseline (`.github/host-images.json`). The production host
+and the v7.2.150 baseline (`.github/host-images.json`; the deployed image is
+pinned in `deploy/deployed-host-image.json`). The production host
 runs the patched `v8.0.38-tog.1` image, which is not in CI; that is an evidence
 gap, covered by a pre-release smoke on a throwaway instance of that exact image
 (separate port, config copy, API-key credentials only): the plugin registers
@@ -100,7 +101,7 @@ unzip -Z1 "$bundle" | sort
 Each bundle entry must match the strict manifest exactly; extra, duplicate, traversal, or unresolved-template entries are invalid.
 
 - The plugin-store registry source is pinned to the immutable release commit recorded in the bundle manifest.
-- `checksums.txt` covers every published file: the shared library, plugin-store archive, operator bundle, registry, compatibility evidence, live verifier, rollback script, helper scripts, provenance, runbook, and corrected templates.
+- `checksums.txt` covers every published file: the shared library, plugin-store archive, operator bundle, registry, compatibility evidence, live verifier, rollback script, helper scripts, runbook, and corrected templates.
 
 Run the credential-free checks before opening the operator handoff:
 

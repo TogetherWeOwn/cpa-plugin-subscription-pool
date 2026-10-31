@@ -166,8 +166,9 @@ plugins:
           quota-refresh-interval: 2m
           # The paid credential is refused (infinite mode or a 429 instead)
           # until a weekly reading arrives, and again once the last one is
-          # older than this. Default 10m, or twice quota-refresh-interval;
-          # at least twice quota-refresh-interval when set.
+          # older than this. Default 10m, or twice quota-refresh-interval if
+          # that is longer; an explicit value must be at least twice
+          # quota-refresh-interval.
           # quota-max-age: 10m
           # Synthetic publishes no concurrency limit. Set these from your own
           # measurements; 0 means no local cap.
