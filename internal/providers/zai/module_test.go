@@ -9,6 +9,7 @@ import (
 )
 
 var _ providermodule.Module = (*zaiModule)(nil)
+var _ providermodule.ConfigValidator = (*zaiModule)(nil)
 
 func TestNewModuleID(t *testing.T) {
 	module := NewModule()

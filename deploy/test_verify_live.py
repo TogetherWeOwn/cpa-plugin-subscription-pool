@@ -8,6 +8,8 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "deploy" / "verify-live.sh"
+# The host's /v0/management/plugins answer while the pool plugin is live.
+REGISTERED_PLUGIN_LISTING = '{"plugins_enabled": true, "plugins": [{"id": "subscription-pool", "registered": true, "effective_enabled": true}]}'
 
 
 class VerifyLiveTest(unittest.TestCase):
@@ -26,6 +28,7 @@ class VerifyLiveTest(unittest.TestCase):
         status_plan_json=None,
         dashboard_json=None,
         coordinator_status_json=None,
+        plugins_json=None,
         log_stalls=False,
         journal_timeout="1",
         router_dry_run=None,
@@ -61,6 +64,8 @@ class VerifyLiveTest(unittest.TestCase):
                 args=sys.argv[1:]
                 if "%{{http_code}}" in args:
                     print("401", end="")
+                elif args and args[-1].endswith("/v0/management/plugins"):
+                    print({plugins_json if plugins_json is not None else REGISTERED_PLUGIN_LISTING!r})
                 elif {"dashboard"!r} in " ".join(args):
                     dashboard_json={dashboard_json!r}
                     if dashboard_json is not None:
@@ -211,7 +216,7 @@ class VerifyLiveTest(unittest.TestCase):
         completed, curl_argv, _ = self.run_verify()
         self.assertEqual(completed.returncode, 0, completed.stderr)
         invocations = [part for part in curl_argv.split("---\n") if "management.curl" in part]
-        self.assertEqual(len(invocations), 2)
+        self.assertEqual(len(invocations), 3)
         for invocation in invocations:
             args = invocation.splitlines()
             self.assertEqual(args[0], "-q")
@@ -338,6 +343,8 @@ class VerifyLiveTest(unittest.TestCase):
                 args = sys.argv[1:]
                 if "%{http_code}" in args:
                     print("401", end="")
+                elif args[-1].endswith("/v0/management/plugins"):
+                    print('{"plugins_enabled": true, "plugins": [{"id": "subscription-pool", "registered": true, "effective_enabled": true}]}')
                 elif "subscription-pool/status" in " ".join(args):
                     print(json.dumps({
                         "plugin": "subscription-pool",
@@ -591,6 +598,33 @@ class VerifyLiveTest(unittest.TestCase):
                 self.assertNotIn("fixture-plan-marker", completed.stdout + completed.stderr)
                 self.assertNotIn("fixture-management-marker", completed.stdout + completed.stderr)
 
+
+    def test_plugin_missing_from_host_snapshot_fails_closed(self):
+        for listing in (
+            '{"plugins_enabled": true, "plugins": []}',
+            '{"plugins_enabled": true, "plugins": [{"id": "subscription-pool", "registered": false, "effective_enabled": false}]}',
+            '{"plugins_enabled": true, "plugins": [{"id": "subscription-pool", "registered": true, "effective_enabled": false}]}',
+            "not json",
+        ):
+            with self.subTest(listing=listing):
+                completed, _, _ = self.run_verify(plugins_json=listing)
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn("host plugin snapshot", completed.stderr)
+
+    def test_host_plugin_snapshot_is_checked(self):
+        completed, curl_argv, _ = self.run_verify()
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("/v0/management/plugins\n", curl_argv)
+
+    def test_rejected_coordinator_config_fails_closed(self):
+        coordinator_json = (
+            '{"plugin":"subscription-pool","status":"reconfigure_rejected","version":"0.0.0-dev",'
+            '"generated_at":"2026-09-10T15:00:00Z","validation_error":"rejected",'
+            '"providers":{"zai":{"provider":"zai"},"opencode-go":{"provider":"opencode-go"}}}'
+        )
+        completed, _, _ = self.run_verify(coordinator_status_json=coordinator_json)
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("rejected plugin config", completed.stderr)
 
 if __name__ == "__main__":
     unittest.main()
