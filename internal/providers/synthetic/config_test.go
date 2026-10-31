@@ -58,6 +58,8 @@ func TestParseConfigRejectsInvalid(t *testing.T) {
 		"relative quota url":   `{"quota-url":"/v2/quotas"}`,
 		"zero quota max age":   `{"quota-max-age":"0"}`,
 		"max age under poll":   `{"quota-refresh-interval":"5m","quota-max-age":"4m"}`,
+		"max age equal poll":   `{"quota-refresh-interval":"5m","quota-max-age":"5m"}`,
+		"max age under 2x":     `{"quota-refresh-interval":"45s","quota-max-age":"89s"}`,
 	}
 	for name, raw := range cases {
 		if _, err := parseConfig(json.RawMessage(raw)); err == nil || !strings.HasPrefix(err.Error(), "synthetic_invalid_config") {
@@ -71,8 +73,9 @@ func TestQuotaMaxAge(t *testing.T) {
 		`{}`:                               10 * time.Minute,
 		`{"quota-refresh-interval":"0"}`:   10 * time.Minute,
 		`{"quota-refresh-interval":"10m"}`: 20 * time.Minute,
-		`{"quota-max-age":"3m"}`:           3 * time.Minute,
-		`{"quota-refresh-interval":"0","quota-max-age":"1h"}`: time.Hour,
+		`{"quota-max-age":"4m"}`:           4 * time.Minute,
+		`{"quota-refresh-interval":"45s","quota-max-age":"90s"}`: 90 * time.Second,
+		`{"quota-refresh-interval":"0","quota-max-age":"1h"}`:    time.Hour,
 	}
 	for raw, want := range cases {
 		cfg, err := parseConfig(json.RawMessage(raw))

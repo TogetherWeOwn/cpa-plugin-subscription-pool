@@ -522,8 +522,9 @@ func (m *Module) pollUsageOnce(ctx context.Context) {
 		interval = minPollInterval
 	}
 	type pollTarget struct {
-		name   string
-		apiKey string
+		name    string
+		apiKey  string
+		authIDs []string
 	}
 	var targets []pollTarget
 	for name, account := range m.state.Accounts {
@@ -534,7 +535,7 @@ func (m *Module) pollUsageOnce(ctx context.Context) {
 			continue
 		}
 		account.lastPollAt = now
-		targets = append(targets, pollTarget{name: name, apiKey: account.DashboardAPIKey})
+		targets = append(targets, pollTarget{name: name, apiKey: account.DashboardAPIKey, authIDs: append([]string(nil), account.AuthIDs...)})
 	}
 	m.mu.Unlock()
 	if len(targets) == 0 {
@@ -542,7 +543,7 @@ func (m *Module) pollUsageOnce(ctx context.Context) {
 	}
 
 	type pollResult struct {
-		name     string
+		target   pollTarget
 		snapshot usageSnapshot
 		err      error
 	}
@@ -553,7 +554,7 @@ func (m *Module) pollUsageOnce(ctx context.Context) {
 		go func(target pollTarget) {
 			defer wg.Done()
 			snapshot, err := fetchUsage(ctx, client, usageEndpoint, target.apiKey, now)
-			results <- pollResult{name: target.name, snapshot: snapshot, err: err}
+			results <- pollResult{target: target, snapshot: snapshot, err: err}
 		}(target)
 	}
 	wg.Wait()
@@ -568,8 +569,10 @@ func (m *Module) pollUsageOnce(ctx context.Context) {
 		if result.err != nil {
 			continue
 		}
-		account := m.state.Accounts[result.name]
-		if account == nil {
+		// A Reconfigure during the fetch may have rebound this account name
+		// to other credentials; the old key's usage says nothing about them.
+		account := m.state.Accounts[result.target.name]
+		if account == nil || account.DashboardAPIKey != result.target.apiKey || !sameIDs(account.AuthIDs, result.target.authIDs) {
 			continue
 		}
 		for kind, window := range snapshotWindows(result.snapshot) {

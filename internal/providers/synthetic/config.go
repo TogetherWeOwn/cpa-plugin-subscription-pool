@@ -39,7 +39,8 @@ type moduleConfig struct {
 	// QuotaMaxAge is how old the last weekly reading (poll or response
 	// header) may be before the paid credential stops receiving new
 	// requests: without a fresh reading the threshold cannot be checked. 0
-	// derives it: 10 minutes, or twice QuotaRefresh when that is longer.
+	// derives it: 10 minutes, or twice QuotaRefresh when that is longer. An
+	// explicit value must be at least twice QuotaRefresh.
 	QuotaMaxAge time.Duration
 	// QuotaURL overrides the quota endpoint. Empty derives it from each
 	// provider's base-url origin plus /v2/quotas.
@@ -120,8 +121,11 @@ func parseConfig(raw json.RawMessage) (moduleConfig, error) {
 	if cfg.QuotaMaxAge, err = durationField("quota-max-age", input.QuotaMaxAge, cfg.QuotaMaxAge, false); err != nil {
 		return moduleConfig{}, err
 	}
-	if cfg.QuotaMaxAge > 0 && cfg.QuotaMaxAge < cfg.QuotaRefresh {
-		return moduleConfig{}, fmt.Errorf("synthetic_invalid_config: quota-max-age must be at least quota-refresh-interval")
+	// Polls land up to a 30s poller tick plus the fetch after each interval,
+	// so a max age near the interval would make the paid lane flap stale on
+	// every cycle.
+	if cfg.QuotaMaxAge > 0 && cfg.QuotaMaxAge < 2*cfg.QuotaRefresh {
+		return moduleConfig{}, fmt.Errorf("synthetic_invalid_config: quota-max-age must be at least twice quota-refresh-interval")
 	}
 	if cfg.FailureCooldown, err = durationField("failure-cooldown", input.FailureCooldown, cfg.FailureCooldown, false); err != nil {
 		return moduleConfig{}, err
