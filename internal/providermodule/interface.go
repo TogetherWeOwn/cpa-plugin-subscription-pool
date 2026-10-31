@@ -168,7 +168,7 @@ type Module interface {
 	// Reconfigure.
 	OwnedAuthIDs(ctx context.Context) []string
 	// Pick returns a scheduling decision for req. The coordinator only calls
-	// Pick after establishing, via Recognize, that no other module owns any
+	// Pick after establishing, via Recognize, that no other module recognizes any
 	// candidate in req. When req also holds candidates this module does not
 	// recognize, only an explicit pick of a recognized candidate is honored;
 	// declining, delegating to a built-in scheduler, or picking a foreign

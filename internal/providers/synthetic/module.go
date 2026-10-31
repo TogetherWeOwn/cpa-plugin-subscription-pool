@@ -398,7 +398,7 @@ func (m *Module) OwnedAuthIDs(context.Context) []string {
 //
 // Candidates belonging to another provider make the pick ambiguous. With a
 // paid credential among them the module fails closed; otherwise it declines
-// (Handled:false) and the host's scheduler decides.
+// (Handled:false), which the coordinator also fails closed for a mixed set.
 func (m *Module) Pick(_ context.Context, req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
 	now := requestTime(req, m.clock())
 	m.mu.Lock()
