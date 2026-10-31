@@ -1,0 +1,180 @@
+package opencodego
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+
+	"github.com/TogetherWeOwn/cpa-plugin-subscription-pool/internal/providermodule"
+)
+
+// countingUsageClient answers every dashboard poll with body and counts them.
+type countingUsageClient struct {
+	mu    sync.Mutex
+	hits  int
+	body  string
+	calls chan struct{}
+}
+
+func newCountingUsageClient(body string) *countingUsageClient {
+	return &countingUsageClient{body: body, calls: make(chan struct{}, 16)}
+}
+
+func (c *countingUsageClient) Do(*http.Request) (*http.Response, error) {
+	c.mu.Lock()
+	c.hits++
+	c.mu.Unlock()
+	select {
+	case c.calls <- struct{}{}:
+	default:
+	}
+	return usageHTTPResponse(http.StatusOK, c.body), nil
+}
+
+func (c *countingUsageClient) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.hits
+}
+
+func pickAt(module *Module, now time.Time, ids ...string) (pluginapi.SchedulerPickResponse, error) {
+	candidates := make([]pluginapi.SchedulerAuthCandidate, 0, len(ids))
+	for _, id := range ids {
+		candidates = append(candidates, pluginapi.SchedulerAuthCandidate{ID: id})
+	}
+	return module.Pick(context.Background(), pluginapi.SchedulerPickRequest{
+		Options:    pluginapi.SchedulerOptions{Metadata: map[string]any{"now": now}},
+		Candidates: candidates,
+	})
+}
+
+// TestStatusNeverPolls pins TWO-335 M2: Status, which the unauthenticated
+// usage resource reaches, reads cached state and sends no dashboard request.
+func TestStatusNeverPolls(t *testing.T) {
+	now := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
+	client := newCountingUsageClient(usageFixture(
+		usageWindowFixture("ok", 1, now.Add(time.Hour)),
+		usageWindowFixture("ok", 1, now.Add(24*time.Hour)),
+		usageWindowFixture("ok", 1, now.Add(20*24*time.Hour)),
+	))
+	module := configuredModuleWithCredential(t, 97, dashboardFixtureKey, client, &fakeModuleClock{now: now})
+	for i := 0; i < 3; i++ {
+		if _, err := module.Status(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := client.count(); got != 0 {
+		t.Fatalf("Status() sent %d dashboard requests, want 0", got)
+	}
+}
+
+// TestBackgroundPollerEnforcesThresholdWithoutStatus pins TWO-335 M2: the
+// poller refreshes usage on its own, so an exhausted account is refused
+// although nobody has viewed status.
+func TestBackgroundPollerEnforcesThresholdWithoutStatus(t *testing.T) {
+	now := time.Now().UTC()
+	client := newCountingUsageClient(usageFixture(
+		usageWindowFixture("ok", 10, now.Add(time.Hour)),
+		usageWindowFixture("ok", 10, now.Add(24*time.Hour)),
+		usageWindowFixture("rate-limited", 100, now.Add(20*24*time.Hour)),
+	))
+	module := NewModule()
+	raw := json.RawMessage(`{"dashboard-api-key":"` + dashboardFixtureKey + `","accounts":[{"name":"go-a","auth-ids":["go-a-1"]}]}`)
+	if err := module.Reconfigure(context.Background(), providermodule.HostConfig{HTTPClient: client}, raw); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-client.calls:
+	case <-time.After(5 * time.Second):
+		t.Fatal("background poller never polled")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_, err := pickAt(module, time.Now().UTC(), "go-a-1")
+		if err != nil && strings.Contains(err.Error(), "opencode_go_no_capacity") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Pick() error = %v after a rate-limited poll, want opencode_go_no_capacity", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	closed := make(chan struct{})
+	go func() { _ = module.Close(context.Background()); close(closed) }()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close() did not stop the poller")
+	}
+}
+
+// TestPollWindowsExpireAtTheirReset pins TWO-335 M2: an exhausted or
+// over-threshold reading never parks the account past the window's reset.
+func TestPollWindowsExpireAtTheirReset(t *testing.T) {
+	now := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
+	for name, body := range map[string]string{
+		"exhausted monthly": usageFixture(
+			usageWindowFixture("ok", 10, now.Add(4*time.Hour)),
+			usageWindowFixture("ok", 10, now.Add(24*time.Hour)),
+			usageWindowFixture("rate-limited", 100, now.Add(time.Hour)),
+		),
+		"five-hour over threshold": usageFixture(
+			usageWindowFixture("ok", 99, now.Add(time.Hour)),
+			usageWindowFixture("ok", 10, now.Add(24*time.Hour)),
+			usageWindowFixture("ok", 10, now.Add(20*24*time.Hour)),
+		),
+	} {
+		t.Run(name, func(t *testing.T) {
+			client := newCountingUsageClient(body)
+			module := configuredModuleWithCredential(t, 97, dashboardFixtureKey, client, &fakeModuleClock{now: now})
+			module.pollUsageOnce(context.Background())
+			if _, err := pickAt(module, now, "go-a-1"); err == nil || !strings.Contains(err.Error(), "opencode_go_no_capacity") {
+				t.Fatalf("Pick() before reset error = %v, want opencode_go_no_capacity", err)
+			}
+			resp, err := pickAt(module, now.Add(time.Hour+time.Second), "go-a-1")
+			if err != nil || !resp.Handled || resp.AuthID != "go-a-1" {
+				t.Fatalf("Pick() after reset = %#v, %v; want go-a-1", resp, err)
+			}
+		})
+	}
+}
+
+func TestQuotaRefreshIntervalConfig(t *testing.T) {
+	cfg, err := parseConfig(json.RawMessage(`{}`))
+	if err != nil || cfg.PollInterval != defaultPollInterval {
+		t.Fatalf("default poll interval = %s, %v", cfg.PollInterval, err)
+	}
+	cfg, err = parseConfig(json.RawMessage(`{"quota-refresh-interval":"5m"}`))
+	if err != nil || cfg.PollInterval != 5*time.Minute {
+		t.Fatalf("poll interval = %s, %v", cfg.PollInterval, err)
+	}
+	for _, raw := range []string{`{"quota-refresh-interval":"10s"}`, `{"quota-refresh-interval":"soon"}`, `{"quota-refresh-interval":"-1m"}`} {
+		if _, err := parseConfig(json.RawMessage(raw)); err == nil || !strings.HasPrefix(err.Error(), "opencode_go_invalid_config") {
+			t.Fatalf("parseConfig(%s) error = %v, want opencode_go_invalid_config", raw, err)
+		}
+	}
+
+	client := newCountingUsageClient(usageFixture(
+		usageWindowFixture("ok", 1, time.Now().Add(time.Hour)),
+		usageWindowFixture("ok", 1, time.Now().Add(24*time.Hour)),
+		usageWindowFixture("ok", 1, time.Now().Add(20*24*time.Hour)),
+	))
+	module := NewModule()
+	raw := json.RawMessage(`{"quota-refresh-interval":"0","dashboard-api-key":"` + dashboardFixtureKey + `","accounts":[{"name":"go-a","auth-ids":["go-a-1"]}]}`)
+	if err := module.Reconfigure(context.Background(), providermodule.HostConfig{HTTPClient: client}, raw); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = module.Close(context.Background()) })
+	module.mu.Lock()
+	started := module.pollerStarted
+	module.mu.Unlock()
+	if started {
+		t.Fatal(`quota-refresh-interval "0" started the poller`)
+	}
+}

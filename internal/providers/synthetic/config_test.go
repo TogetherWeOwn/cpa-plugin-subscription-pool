@@ -56,10 +56,31 @@ func TestParseConfigRejectsInvalid(t *testing.T) {
 		"overlapping names":    `{"paid-providers":["synthetic"],"infinite-providers":["synthetic"]}`,
 		"no providers":         `{"paid-providers":[],"infinite-providers":[]}`,
 		"relative quota url":   `{"quota-url":"/v2/quotas"}`,
+		"zero quota max age":   `{"quota-max-age":"0"}`,
+		"max age under poll":   `{"quota-refresh-interval":"5m","quota-max-age":"4m"}`,
 	}
 	for name, raw := range cases {
 		if _, err := parseConfig(json.RawMessage(raw)); err == nil || !strings.HasPrefix(err.Error(), "synthetic_invalid_config") {
 			t.Fatalf("%s: err = %v, want synthetic_invalid_config", name, err)
+		}
+	}
+}
+
+func TestQuotaMaxAge(t *testing.T) {
+	cases := map[string]time.Duration{
+		`{}`:                               10 * time.Minute,
+		`{"quota-refresh-interval":"0"}`:   10 * time.Minute,
+		`{"quota-refresh-interval":"10m"}`: 20 * time.Minute,
+		`{"quota-max-age":"3m"}`:           3 * time.Minute,
+		`{"quota-refresh-interval":"0","quota-max-age":"1h"}`: time.Hour,
+	}
+	for raw, want := range cases {
+		cfg, err := parseConfig(json.RawMessage(raw))
+		if err != nil {
+			t.Fatalf("parseConfig(%s) error = %v", raw, err)
+		}
+		if got := cfg.quotaMaxAge(); got != want {
+			t.Fatalf("parseConfig(%s).quotaMaxAge() = %s, want %s", raw, got, want)
 		}
 	}
 }

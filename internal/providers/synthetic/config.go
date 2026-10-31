@@ -11,6 +11,7 @@ import (
 const (
 	defaultThresholdPercent  = 95
 	defaultQuotaRefresh      = 2 * time.Minute
+	defaultQuotaMaxAge       = 10 * time.Minute
 	minQuotaRefresh          = 30 * time.Second
 	defaultFailureCooldown   = 10 * time.Minute
 	defaultInfiniteCooldown  = 30 * time.Second
@@ -35,6 +36,11 @@ type moduleConfig struct {
 	// endpoint does not count against the subscription. 0 disables polling;
 	// the module then relies on the x-synthetic-quotas response header.
 	QuotaRefresh time.Duration
+	// QuotaMaxAge is how old the last weekly reading (poll or response
+	// header) may be before the paid credential stops receiving new
+	// requests: without a fresh reading the threshold cannot be checked. 0
+	// derives it: 10 minutes, or twice QuotaRefresh when that is longer.
+	QuotaMaxAge time.Duration
 	// QuotaURL overrides the quota endpoint. Empty derives it from each
 	// provider's base-url origin plus /v2/quotas.
 	QuotaURL string
@@ -59,6 +65,7 @@ type rawModuleConfig struct {
 	Enabled               *bool    `json:"enabled"`
 	ThresholdPercent      *int     `json:"threshold-percent"`
 	QuotaRefreshInterval  *string  `json:"quota-refresh-interval"`
+	QuotaMaxAge           *string  `json:"quota-max-age"`
 	QuotaURL              string   `json:"quota-url"`
 	FailureCooldown       *string  `json:"failure-cooldown"`
 	InfiniteCooldown      *string  `json:"infinite-cooldown"`
@@ -110,6 +117,12 @@ func parseConfig(raw json.RawMessage) (moduleConfig, error) {
 	if cfg.QuotaRefresh > 0 && cfg.QuotaRefresh < minQuotaRefresh {
 		return moduleConfig{}, fmt.Errorf("synthetic_invalid_config: quota-refresh-interval must be 0 (off) or at least %s", minQuotaRefresh)
 	}
+	if cfg.QuotaMaxAge, err = durationField("quota-max-age", input.QuotaMaxAge, cfg.QuotaMaxAge, false); err != nil {
+		return moduleConfig{}, err
+	}
+	if cfg.QuotaMaxAge > 0 && cfg.QuotaMaxAge < cfg.QuotaRefresh {
+		return moduleConfig{}, fmt.Errorf("synthetic_invalid_config: quota-max-age must be at least quota-refresh-interval")
+	}
 	if cfg.FailureCooldown, err = durationField("failure-cooldown", input.FailureCooldown, cfg.FailureCooldown, false); err != nil {
 		return moduleConfig{}, err
 	}
@@ -154,6 +167,17 @@ func parseConfig(raw json.RawMessage) (moduleConfig, error) {
 		}
 	}
 	return cfg, nil
+}
+
+// quotaMaxAge returns the configured QuotaMaxAge, or the derived default.
+func (c moduleConfig) quotaMaxAge() time.Duration {
+	if c.QuotaMaxAge > 0 {
+		return c.QuotaMaxAge
+	}
+	if derived := 2 * c.QuotaRefresh; derived > defaultQuotaMaxAge {
+		return derived
+	}
+	return defaultQuotaMaxAge
 }
 
 func durationField(name string, raw *string, fallback time.Duration, allowZero bool) (time.Duration, error) {

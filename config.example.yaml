@@ -145,6 +145,9 @@ plugins:
           # account. Omitting both is valid -- the module fails closed to
           # "unknown" reset times rather than guessing.
           dashboard-api-key: ${OPENCODE_GO_DASHBOARD_KEY}
+          # Background dashboard usage poll per account (default 2m, at
+          # least 30s; "0" turns it off and quota comes only from 429s).
+          # quota-refresh-interval: 2m
           accounts:
             - name: go-a
               auth-ids: ["replace-with-managed-auth-id"]
@@ -158,6 +161,10 @@ plugins:
           # GET /v2/quotas does not count against the plan. "0" disables
           # polling and relies on the x-synthetic-quotas response header.
           quota-refresh-interval: 2m
+          # The paid credential is refused (infinite mode or a 429 instead)
+          # until a weekly reading arrives, and again once the last one is
+          # older than this. Default 10m, or twice quota-refresh-interval.
+          # quota-max-age: 10m
           # Synthetic publishes no concurrency limit. Set these from your own
           # measurements; 0 means no local cap.
           max-concurrent: 0
