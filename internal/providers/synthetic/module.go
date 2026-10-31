@@ -406,29 +406,31 @@ func (m *Module) Pick(_ context.Context, req pluginapi.SchedulerPickRequest) (pl
 	if !m.activeLocked() {
 		return pluginapi.SchedulerPickResponse{Handled: false}, nil
 	}
-	var paid, infinite []*lane
-	foreign := false
-	for _, candidate := range req.Candidates {
+	foreign, hasPaid := false, false
+	kinds := make([]laneKind, len(req.Candidates))
+	for i, candidate := range req.Candidates {
 		kind, ok := m.kindOfLocked(candidate)
-		if !ok {
-			foreign = true
-			continue
-		}
-		item := m.laneForCandidateLocked(candidate, kind)
-		if kind == kindPaid {
-			paid = append(paid, item)
-		} else {
-			infinite = append(infinite, item)
-		}
+		foreign = foreign || !ok
+		hasPaid = hasPaid || kind == kindPaid
+		kinds[i] = kind
 	}
-	if foreign && len(paid) > 0 {
+	if foreign && hasPaid {
 		// Declining would let the host's scheduler pick a paid lane with no
 		// threshold check, so a paid lane mixed with a foreign one is refused.
 		m.routing.Rejections++
 		return pluginapi.SchedulerPickResponse{}, newSchedulerError("synthetic_foreign_candidate", "candidates mix synthetic.new paid credentials with another provider")
 	}
-	if foreign || (len(paid) == 0 && len(infinite) == 0) {
+	if foreign || len(req.Candidates) == 0 {
 		return pluginapi.SchedulerPickResponse{Handled: false}, nil
+	}
+	var paid, infinite []*lane
+	for i, candidate := range req.Candidates {
+		item := m.laneForCandidateLocked(candidate, kinds[i])
+		if kinds[i] == kindPaid {
+			paid = append(paid, item)
+		} else {
+			infinite = append(infinite, item)
+		}
 	}
 	sortLanes(paid)
 	sortLanes(infinite)

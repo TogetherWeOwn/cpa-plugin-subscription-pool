@@ -96,7 +96,9 @@ func (r *pluginRuntime) pick(req pluginapi.SchedulerPickRequest) (pluginapi.Sche
 	if managedCount == 0 {
 		return pluginapi.SchedulerPickResponse{Handled: false}, nil
 	}
-	if impairedCount == 0 {
+	// Built-in round-robin would choose among foreign candidates too, so a
+	// mixed set takes the explicit path below.
+	if impairedCount == 0 && managedCount == len(req.Candidates) {
 		return pluginapi.SchedulerPickResponse{Handled: true, DelegateBuiltin: pluginapi.SchedulerBuiltinRoundRobin}, nil
 	}
 

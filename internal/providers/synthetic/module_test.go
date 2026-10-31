@@ -329,6 +329,18 @@ func TestForeignCandidateWithPaidLaneFailsClosed(t *testing.T) {
 	}
 }
 
+func TestRejectedForeignPickLearnsNoLane(t *testing.T) {
+	m, _ := newTestModule(t, "{}")
+	before := len(m.lanes)
+	rekeyed := candidate("openai-compatibility:synthetic:aaaaaaaaaaaa", "synthetic")
+	if _, err := m.Pick(context.Background(), pickReq(true, rekeyed, candidate("openai-compatibility:opencode-go:x", "opencode-go"))); err == nil {
+		t.Fatal("mixed Pick with a paid lane admitted")
+	}
+	if len(m.lanes) != before {
+		t.Fatalf("rejected Pick learned a lane: %d lanes, want %d", len(m.lanes), before)
+	}
+}
+
 func TestForeignCandidateWithInfiniteLaneDeclines(t *testing.T) {
 	m, _ := newTestModule(t, "{}")
 	resp, err := m.Pick(context.Background(), pickReq(true, candidate(infiniteAuthID, "synthetic-infinite"), candidate("openai-compatibility:opencode-go:x", "opencode-go")))

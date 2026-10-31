@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
-- Scheduler picks fail closed when one provider module recognizes only some of the candidates (`coordinator_mixed_provider_pick`). Cloudflare in `stayWithinIncluded` mode (`cloudflare_no_capacity: foreign_candidate`) and synthetic with a paid credential in the set (`synthetic_foreign_candidate`) also refuse such sets themselves instead of declining.
+- Scheduler picks whose candidates mix a managed provider with an unmanaged one fail closed unless the owning module explicitly picks one of its own credentials (`coordinator_mixed_provider_pick`). Z.ai picks explicitly instead of delegating to round-robin when the set is mixed. Cloudflare in `stayWithinIncluded` mode (`cloudflare_no_capacity: foreign_candidate`) and synthetic with a paid credential in the set (`synthetic_foreign_candidate`) refuse such sets themselves instead of declining, and a refused synthetic pick no longer records learned lanes.
 
 ## [0.7.1] - 2026-10-31
 
