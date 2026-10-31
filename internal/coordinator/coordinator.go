@@ -99,7 +99,7 @@ func (c *Coordinator) reconfigure(rawConfig []byte) error {
 	if err != nil {
 		return c.recordError(err)
 	}
-	if err = validateSchedulerDeployment(cpa.Plugins); err != nil {
+	if err = validateSchedulerDeployment(cpa.Plugins, cfg.CoexistingPlugins); err != nil {
 		return c.recordError(err)
 	}
 	rootAuthDir, err := resolveAuthDir(cpa.AuthDir)

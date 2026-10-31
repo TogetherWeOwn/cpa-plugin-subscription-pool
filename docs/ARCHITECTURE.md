@@ -205,7 +205,7 @@ A valid logical account has exactly one matching Claude entry and exactly one ma
 
 ### Plugin schema
 
-The coordinator owns only `enabled`, `priority`, and `cpa-config-path`; everything else nests under `providers.<id>`, and each provider owns its own sub-schema exclusively. `providers.zai`'s field set is an unchanged lift of the pre-coordinator flat schema:
+The coordinator owns only `enabled`, `priority`, `cpa-config-path` and `coexisting-plugins`; everything else nests under `providers.<id>`, and each provider owns its own sub-schema exclusively. `providers.zai`'s field set is an unchanged lift of the pre-coordinator flat schema:
 
 ```yaml
 plugins:
@@ -382,7 +382,7 @@ A real 429 overrides a lower estimate. Repeated failures extend, never shorten, 
 
 ## Scheduler
 
-CPA v7.2.150 invokes only the first active scheduler plugin, ordered by descending `plugins.configs.<id>.priority` and then ascending plugin ID. Quota enforcement is therefore a deployment invariant, not composable middleware: v0.1 supports exactly one enabled scheduler plugin, `subscription-pool`. Startup/dogfood validation inspects the configured and registered capability set and refuses the lane if any second scheduler is enabled or if this plugin is not first. `priority: 1000` is required as defense in depth, but exclusivity is the safety property. CI fixtures cover a lower-priority competitor, a higher-priority competitor, and an equal-priority ID tie; every non-exclusive configuration must fail closed before traffic is admitted.
+CPA v7.2.150 invokes only the first active scheduler plugin, ordered by descending `plugins.configs.<id>.priority` and then ascending plugin ID. Quota enforcement is therefore a deployment invariant, not composable middleware: v0.1 supports exactly one enabled scheduler plugin, `subscription-pool`. Startup/dogfood validation inspects the configured and registered capability set and refuses the lane if any second scheduler is enabled or if this plugin is not first. Because capabilities are not visible from configuration, any other enabled plugin fails closed unless the operator lists it in `coexisting-plugins`, confirming it registers no Scheduler (provider-only plugins); a listed plugin must still sort after this one. `priority: 1000` is required as defense in depth, but exclusivity is the safety property. CI fixtures cover a lower-priority competitor, a higher-priority competitor, and an equal-priority ID tie; every non-exclusive configuration must fail closed before traffic is admitted.
 
 The coordinator, not any individual provider module, holds this single scheduler slot and dispatches every `scheduler.pick`/`usage.handle` call across its hosted modules under six invariants:
 

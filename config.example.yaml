@@ -105,6 +105,9 @@ plugins:
       enabled: true
       priority: 1000
       cpa-config-path: /app/config.yaml
+      # Plugin IDs you confirm register no Scheduler (provider-only plugins).
+      # Any other enabled plugin makes reconfigure fail closed.
+      # coexisting-plugins: [synthetic]
       providers:
         nvidia-nim:
           stayWithinFree: true

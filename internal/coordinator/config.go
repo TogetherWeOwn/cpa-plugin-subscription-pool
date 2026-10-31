@@ -24,10 +24,14 @@ const defaultCPAConfigPath = "config.yaml"
 // both v7.2.150 and v7.2.157) rather than stripping them, so KnownFields(true)
 // must declare and ignore them here or every real reconfigure call fails.
 type coordinatorConfig struct {
-	CPAConfigPath string               `yaml:"cpa-config-path"`
-	Providers     map[string]yaml.Node `yaml:"providers"`
-	Enabled       *bool                `yaml:"enabled"`
-	Priority      *int                 `yaml:"priority"`
+	CPAConfigPath string `yaml:"cpa-config-path"`
+	// CoexistingPlugins lists plugin IDs the operator confirms register NO
+	// Scheduler capability (provider-only plugins). Only these may be enabled
+	// alongside this plugin; see validateSchedulerDeployment.
+	CoexistingPlugins []string             `yaml:"coexisting-plugins"`
+	Providers         map[string]yaml.Node `yaml:"providers"`
+	Enabled           *bool                `yaml:"enabled"`
+	Priority          *int                 `yaml:"priority"`
 }
 
 func parseCoordinatorConfig(raw []byte) (coordinatorConfig, error) {
@@ -179,16 +183,17 @@ func loadHostCPAConfig(path string) (hostCPAConfig, error) {
 }
 
 // validateSchedulerDeployment enforces the host-level rule that this plugin
-// must be the scheduler CLIProxyAPI actually consults. The host's scheduler
-// slot runs only the FIRST active plugin that registers a Scheduler, ordered by
-// priority desc, then plugin ID asc (internal/pluginhost/snapshot.go sortRecords,
-// internal/pluginhost/scheduler.go schedulerRecord), and silently ignores the
-// rest. Other enabled plugins are therefore safe exactly when none of them can
-// sort ahead of this one: provider plugins (auth/model/executor/quota only, no
-// Scheduler) at the default priority 0 coexist, while any plugin that could
-// outrank this one is rejected because a Scheduler it registers would win
-// silently. Capabilities are not visible from config, so ordering is the check.
-func validateSchedulerDeployment(plugins pluginsProjection) error {
+// must be the sole enabled scheduler: CLIProxyAPI's scheduler slot runs only
+// the first active plugin that registers a Scheduler, ordered by priority
+// desc, then plugin ID asc, and silently ignores the rest (host
+// internal/pluginhost/snapshot.go sortRecords, scheduler.go schedulerRecord),
+// so a second scheduler would blend or lose quota domains without any error.
+//
+// Capabilities are not visible from configuration, so another enabled plugin
+// is accepted only when the operator explicitly confirms it registers no
+// Scheduler (listed in coexisting-plugins) AND it cannot sort ahead of this
+// plugin. Every unlisted enabled plugin still fails closed.
+func validateSchedulerDeployment(plugins pluginsProjection, coexisting []string) error {
 	if !plugins.Enabled {
 		return fmt.Errorf("plugins must be enabled")
 	}
@@ -198,6 +203,10 @@ func validateSchedulerDeployment(plugins pluginsProjection) error {
 	}
 	if item.Priority != requiredPluginPriority {
 		return fmt.Errorf("%s priority must be %d", PluginID, requiredPluginPriority)
+	}
+	confirmed := make(map[string]bool, len(coexisting))
+	for _, id := range coexisting {
+		confirmed[strings.TrimSpace(id)] = true
 	}
 	ids := make([]string, 0, len(plugins.Configs))
 	for id := range plugins.Configs {
@@ -209,8 +218,11 @@ func validateSchedulerDeployment(plugins pluginsProjection) error {
 		if id == PluginID || configured.Enabled == nil || !*configured.Enabled {
 			continue
 		}
+		if !confirmed[id] {
+			return fmt.Errorf("%s must be the sole enabled scheduler plugin; disable %s, or list it in coexisting-plugins if it registers no Scheduler", PluginID, id)
+		}
 		if outranksInHostOrder(id, configured.Priority, PluginID, item.Priority) {
-			return fmt.Errorf("%s must be the first scheduler in host order; plugin %s (priority %d) would be consulted first: give it a priority below %d or disable it", PluginID, id, configured.Priority, requiredPluginPriority)
+			return fmt.Errorf("%s must be the first plugin in host order; coexisting plugin %s (priority %d) would sort ahead of it: give it a priority below %d", PluginID, id, configured.Priority, requiredPluginPriority)
 		}
 	}
 	return nil

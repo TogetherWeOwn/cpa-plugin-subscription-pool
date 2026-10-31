@@ -15,44 +15,61 @@ func disabledPlugin(priority int) pluginProjection {
 	return pluginProjection{Enabled: &off, Priority: priority}
 }
 
-// Provider-only plugins (no Scheduler capability) at the default priority must
-// coexist: the host consults only the first Scheduler in priority-desc/ID-asc
-// order, so they can never displace this plugin. Regression for a deployment
-// where enabling an unrelated provider plugin made reconfigure fail with
-// "must be the sole enabled scheduler plugin" and dropped every pool account.
-func TestValidateSchedulerDeploymentAllowsNonOutrankingPlugins(t *testing.T) {
+// Provider-only plugins (no Scheduler capability) that the operator lists in
+// coexisting-plugins must coexist when they cannot sort ahead of this plugin.
+// Regression for a deployment where enabling an unrelated provider plugin made
+// reconfigure fail with "must be the sole enabled scheduler plugin" and
+// dropped every pool account.
+func TestValidateSchedulerDeploymentAllowsConfirmedNonOutrankingPlugins(t *testing.T) {
 	plugins := pluginsProjection{Enabled: true, Configs: map[string]pluginProjection{
 		PluginID:                enabledPlugin(requiredPluginPriority),
 		"synthetic":             enabledPlugin(0),
 		"nvidia-nim":            enabledPlugin(0),
-		"cloudflare-workers-ai": enabledPlugin(0),
-		"aaa-low":               enabledPlugin(requiredPluginPriority - 1),
+		"cloudflare-workers-ai": enabledPlugin(requiredPluginPriority - 1),
 		"zzz-tie":               enabledPlugin(requiredPluginPriority),
 		"disabled-high":         disabledPlugin(requiredPluginPriority + 50),
 		"unset-enabled":         {Priority: requiredPluginPriority + 50},
 	}}
-	if err := validateSchedulerDeployment(plugins); err != nil {
-		t.Fatalf("validateSchedulerDeployment() = %v, want provider plugins that cannot outrank %s accepted", err, PluginID)
+	coexisting := []string{"synthetic", "nvidia-nim", " cloudflare-workers-ai ", "zzz-tie"}
+	if err := validateSchedulerDeployment(plugins, coexisting); err != nil {
+		t.Fatalf("validateSchedulerDeployment() = %v, want confirmed provider plugins accepted", err)
 	}
 }
 
-func TestValidateSchedulerDeploymentRejectsPluginsConsultedFirst(t *testing.T) {
+// An unlisted enabled plugin may register a Scheduler the host would silently
+// ignore (lower priority) or consult first (higher priority): both fail closed.
+func TestValidateSchedulerDeploymentRejectsUnconfirmedPlugins(t *testing.T) {
+	for name, priority := range map[string]int{"lower competitor": 1, "default priority": 0, "higher competitor": 2000, "equal priority": requiredPluginPriority} {
+		t.Run(name, func(t *testing.T) {
+			plugins := pluginsProjection{Enabled: true, Configs: map[string]pluginProjection{
+				PluginID:     enabledPlugin(requiredPluginPriority),
+				"competitor": enabledPlugin(priority),
+			}}
+			err := validateSchedulerDeployment(plugins, []string{"something-else"})
+			if err == nil || !strings.Contains(err.Error(), "sole enabled scheduler") || !strings.Contains(err.Error(), "competitor") {
+				t.Fatalf("validateSchedulerDeployment() = %v, want fail-closed rejection naming competitor", err)
+			}
+		})
+	}
+}
+
+// Even a confirmed plugin must not sort ahead of this plugin in host order.
+func TestValidateSchedulerDeploymentRejectsConfirmedPluginsThatOutrank(t *testing.T) {
 	for name, tc := range map[string]struct {
 		id       string
 		priority int
 	}{
-		"higher priority":      {"zzz-high", requiredPluginPriority + 1},
-		"tie with smaller ID":  {"aaa-tie", requiredPluginPriority},
-		"much higher priority": {"synthetic", 5000},
+		"higher priority":     {"zzz-high", requiredPluginPriority + 1},
+		"tie with smaller ID": {"aaa-tie", requiredPluginPriority},
 	} {
 		t.Run(name, func(t *testing.T) {
 			plugins := pluginsProjection{Enabled: true, Configs: map[string]pluginProjection{
 				PluginID: enabledPlugin(requiredPluginPriority),
 				tc.id:    enabledPlugin(tc.priority),
 			}}
-			err := validateSchedulerDeployment(plugins)
-			if err == nil || !strings.Contains(err.Error(), tc.id) {
-				t.Fatalf("validateSchedulerDeployment() = %v, want rejection naming %s", err, tc.id)
+			err := validateSchedulerDeployment(plugins, []string{tc.id})
+			if err == nil || !strings.Contains(err.Error(), "sort ahead") {
+				t.Fatalf("validateSchedulerDeployment() = %v, want ordering rejection for %s", err, tc.id)
 			}
 		})
 	}
@@ -66,9 +83,16 @@ func TestValidateSchedulerDeploymentKeepsOwnRequirements(t *testing.T) {
 		"wrong priority":   {Enabled: true, Configs: map[string]pluginProjection{PluginID: enabledPlugin(10)}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if err := validateSchedulerDeployment(plugins); err == nil {
+			if err := validateSchedulerDeployment(plugins, nil); err == nil {
 				t.Fatal("validateSchedulerDeployment() = nil, want error")
 			}
 		})
+	}
+}
+
+func TestParseCoordinatorConfigAcceptsCoexistingPlugins(t *testing.T) {
+	cfg, err := parseCoordinatorConfig([]byte("cpa-config-path: /tmp/config.yaml\ncoexisting-plugins: [nvidia-nim, cloudflare-workers-ai]\nenabled: true\npriority: 1000\n"))
+	if err != nil || strings.Join(cfg.CoexistingPlugins, ",") != "nvidia-nim,cloudflare-workers-ai" {
+		t.Fatalf("parseCoordinatorConfig() = %+v, %v", cfg.CoexistingPlugins, err)
 	}
 }
