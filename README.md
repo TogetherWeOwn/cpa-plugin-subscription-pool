@@ -33,7 +33,7 @@ The official plugin list shows **Subscription Pool: Z.ai · OpenCode Go · synth
 
 - Linux amd64
 - a CLIProxyAPI host accepting native plugin ABI 1 and schema 5 (SDK v7.2.154; baseline v7.2.150, with newer v8 hosts covered by the exact-image gates; v7.2.67 accepts only schema 1 and cannot load this plugin)
-- exactly one enabled scheduler plugin, with `subscription-pool` configured at priority `1000`
+- exactly one enabled scheduler plugin, with `subscription-pool` configured at priority `1000`; other enabled plugins only when listed in `coexisting-plugins` (operator-confirmed to register no Scheduler) and sorted after it
 - credentials for at least one configured module, used under that provider's actual account/model entitlement and terms (unconfigured modules remain inactive; NVIDIA trial rights are not production rights)
 - Go 1.26 and a GCC-compatible C toolchain only when building from source
 
@@ -259,6 +259,7 @@ The provider-specific settings below describe `providers.zai`; they are not defa
 | `enabled` | host default | Per-plugin enable switch under `plugins.configs.subscription-pool`. |
 | `priority` | `1000` required | Host-level scheduler priority. V0.1 also rejects any second enabled scheduler plugin. |
 | `cpa-config-path` | `config.yaml` | CLIProxyAPI configuration used to discover exact credential pairs and `auth-dir`. |
+| `coexisting-plugins` | `[]` | Plugin IDs you confirm register **no** Scheduler (provider-only plugins, e.g. `nvidia-nim`). Only these may be enabled alongside `subscription-pool`, and each must sort after it (priority below `1000`, or `1000` with a larger ID). Any other enabled plugin fails reconfigure closed. A provider plugin that serves the same provider ID as a pool module needs that module disabled (`providers.<id>.enabled: false`). |
 | `quota-refresh-interval` | `2m` | Base poll interval; jittered polling accepts only `1m`–`3m`. |
 | `authoritative-max-age` | `5m` | Maximum age before authoritative data becomes stale; must exceed maximum polling jitter. |
 | `threshold-percent` | `97` | Either quota bucket reaching this percentage exhausts the account. |
