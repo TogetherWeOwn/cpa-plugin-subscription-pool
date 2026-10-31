@@ -6,6 +6,9 @@ import tempfile
 import textwrap
 import unittest
 
+import hermetic
+from hermetic import tearDownModule  # noqa: F401  (fails the module on a bypassed stub)
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "deploy" / "rollback.sh"
 
@@ -125,11 +128,11 @@ os.execv(REAL, [REAL] + sys.argv[1:])
 
     def test_rejects_unsafe_management_urls_before_credentialed_curl(self):
         cases = {
-            "userinfo": "http://user@127.0.0.1:8317",
+            "userinfo": hermetic.ORIGIN.replace("http://", "http://user@"),
             "wrong origin": "http://127.0.0.1:9999",
             "non-loopback": "https://example.com:8317",
-            "query": "http://127.0.0.1:8317?target=evil",
-            "fragment": "http://127.0.0.1:8317#evil",
+            "query": hermetic.ORIGIN + "?target=evil",
+            "fragment": hermetic.ORIGIN + "#evil",
             "invalid port": "http://127.0.0.1:invalid",
         }
         for name, url in cases.items():
@@ -141,7 +144,7 @@ os.execv(REAL, [REAL] + sys.argv[1:])
 
     def test_docker_restart_replaces_legacy_systemd_path(self):
         completed, calls = self.run_rollback(
-            "http://127.0.0.1:8317",
+            hermetic.ORIGIN,
             {"CLIPROXY_CONTAINER": "cliproxy-main"},
             strip_key_uid_check=True,
         )
@@ -151,7 +154,7 @@ os.execv(REAL, [REAL] + sys.argv[1:])
 
     def test_explicit_restart_command_wins_over_docker(self):
         completed, calls = self.run_rollback(
-            "http://127.0.0.1:8317",
+            hermetic.ORIGIN,
             {
                 "CLIPROXY_CONTAINER": "cliproxy-main",
                 "CLIPROXY_RESTART_COMMAND": "true docker-bypassed",
@@ -164,7 +167,7 @@ os.execv(REAL, [REAL] + sys.argv[1:])
 
     def test_rejects_unsafe_container_names(self):
         completed, calls = self.run_rollback(
-            "http://127.0.0.1:8317", {"CLIPROXY_CONTAINER": "evil;reboot"}
+            hermetic.ORIGIN, {"CLIPROXY_CONTAINER": "evil;reboot"}
         )
         self.assertNotEqual(completed.returncode, 0)
         self.assertEqual(calls["docker"], "")
@@ -173,7 +176,7 @@ os.execv(REAL, [REAL] + sys.argv[1:])
 
     def test_config_ownership_is_parameterized_never_changed(self):
         completed, calls = self.run_rollback(
-            "http://127.0.0.1:8317",
+            hermetic.ORIGIN,
             {"CLIPROXY_CONFIG_UID": "1000", "CLIPROXY_CONFIG_GID": "1000"},
             stat_uid="1000",
             stat_gid="1000",
@@ -181,7 +184,7 @@ os.execv(REAL, [REAL] + sys.argv[1:])
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         completed, _ = self.run_rollback(
-            "http://127.0.0.1:8317",
+            hermetic.ORIGIN,
             {"CLIPROXY_CONFIG_UID": "1000", "CLIPROXY_CONFIG_GID": "1000"},
             stat_uid="0",
             stat_gid="0",
@@ -189,7 +192,7 @@ os.execv(REAL, [REAL] + sys.argv[1:])
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("CLIPROXY_CONFIG_UID", completed.stderr)
         completed, _ = self.run_rollback(
-            "http://127.0.0.1:8317", {"CLIPROXY_CONFIG_UID": "root"}
+            hermetic.ORIGIN, {"CLIPROXY_CONFIG_UID": "root"}
         )
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("numeric", completed.stderr)
@@ -254,7 +257,7 @@ os.execv(REAL, [REAL] + sys.argv[1:])
             env.update(
                 {
                     "PATH": f"{bin_dir}:{env['PATH']}",
-                    "CLIPROXY_MANAGEMENT_URL": "http://127.0.0.1:8317",
+                    "CLIPROXY_MANAGEMENT_URL": hermetic.ORIGIN,
                     "CLIPROXY_CONFIG": str(config),
                     "CLIPROXY_BACKUP": str(backup),
                     "CLIPROXY_MANAGEMENT_KEY_FILE": str(key_file),
