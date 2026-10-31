@@ -340,3 +340,15 @@ func TestValidateConfigMatchesReconfigureWithoutApplying(t *testing.T) {
 		t.Fatalf("ValidateConfig changed the live lanes: %v, want %v", got, ids)
 	}
 }
+
+func TestMixedForeignCandidateFailsClosedWhenIncludedOnly(t *testing.T) {
+	m, _, h := configured(t, `{}`)
+	m.pollOnce(context.Background(), true)
+	r := pickRequest(m, 0)
+	r.Candidates = append(r.Candidates, pluginapi.SchedulerAuthCandidate{ID: "foreign-auth", Provider: "openai-compatible-other"})
+	mustRefuse(t, m, r, "foreign_candidate")
+	reconfigure(t, m, h, `{"stayWithinIncluded":false}`)
+	if got, err := m.Pick(context.Background(), r); err != nil || got.Handled {
+		t.Fatalf("PAYG mixed pick = %+v %v, want Handled:false", got, err)
+	}
+}

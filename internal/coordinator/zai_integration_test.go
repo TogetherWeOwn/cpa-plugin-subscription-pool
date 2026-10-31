@@ -99,3 +99,29 @@ func TestCoordinatorPropagatesZaiNoCapacityError(t *testing.T) {
 		t.Fatalf("pick() error = %v, want zai_no_capacity propagated verbatim", err)
 	}
 }
+
+// A healthy Z.ai lane mixed with a foreign candidate is picked explicitly:
+// delegating to built-in round-robin would hand the choice to the host.
+func TestCoordinatorZaiMixedCandidatesPickOwnedLane(t *testing.T) {
+	root := t.TempDir()
+	authDir := filepath.Join(root, "auth")
+	configPath := filepath.Join(root, "config.yaml")
+	writeCoordinatorCPAConfigFixture(t, configPath, authDir, zaiIntegrationFixtureKey)
+
+	c := New(zai.NewModule())
+	rawConfig := []byte("cpa-config-path: " + configPath + "\nproviders:\n  zai:\n    default-plan: pro\n")
+	if err := c.reconfigure(rawConfig); err != nil {
+		t.Fatalf("reconfigure() error = %v", err)
+	}
+	owned := c.modules[0].module.OwnedAuthIDs(context.Background())
+	if len(owned) == 0 {
+		t.Fatal("zai module reported no owned auth ids after reconfigure")
+	}
+	resp, err := c.pick(pluginapi.SchedulerPickRequest{Candidates: []pluginapi.SchedulerAuthCandidate{
+		{ID: owned[0], Attributes: map[string]string{"base_url": "https://api.z.ai/api/anthropic"}},
+		{ID: "foreign-auth", Provider: "claude"},
+	}})
+	if err != nil || !resp.Handled || resp.DelegateBuiltin != "" || resp.AuthID != owned[0] {
+		t.Fatalf("pick() = %#v, %v; want explicit pick of %s", resp, err, owned[0])
+	}
+}

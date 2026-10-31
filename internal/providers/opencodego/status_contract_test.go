@@ -13,7 +13,7 @@ func TestStatusContractDoesNotExportCooldownFromWindowReset(t *testing.T) {
 	resetAt := now.Add(time.Hour)
 	cooldownAt := now.Add(5 * time.Minute)
 	// Synthetic state, no dashboard credential, host auth IDs, or network client.
-	// Status still runs pollUsageOnce; this fixture has nothing eligible to poll.
+	// Status reads cached state only; it never polls.
 	m := &Module{
 		clock: &fakeModuleClock{now: now},
 		state: &moduleState{Accounts: map[string]*accountState{

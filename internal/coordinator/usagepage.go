@@ -181,6 +181,8 @@ func reasonCode(text string) string {
 		return "quota_exhausted"
 	case strings.HasPrefix(text, "weekly credits"):
 		return "at_threshold"
+	case strings.HasPrefix(text, "quota reading"):
+		return "quota_unknown_or_stale"
 	case strings.Contains(text, "concurrency cap"):
 		return "concurrency_cap"
 	case strings.HasPrefix(text, "busy until"):

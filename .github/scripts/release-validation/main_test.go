@@ -291,7 +291,10 @@ func TestValidateReleaseWorkflowBoundaryAcceptsCanonicalWorkflow(t *testing.T) {
 func TestValidateReleaseWorkflowBoundaryRejectsPreviousDownloadAction(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	workflow := strings.Replace(validReleaseWorkflow(t), "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333", "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c", 1)
+	original := validReleaseWorkflow(t)
+	// The publish job holds the last download step; the host matrix job has its own.
+	cut := strings.LastIndex(original, "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333")
+	workflow := original[:cut] + "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c" + original[cut+len("actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333"):]
 	writeReleaseWorkflows(t, root, workflow)
 	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "canonical action") {
 		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want previous download action rejection", err)
@@ -567,5 +570,91 @@ func writeChecksums(t *testing.T, path string, artifacts []string) {
 	}
 	if err := os.WriteFile(path, []byte(lines.String()), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestValidateReleaseWorkflowBoundaryRejectsMatrixInBuildJob(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	original := validReleaseWorkflow(t)
+	workflow := strings.Replace(original, "      - name: Stage release artifacts\n", "      - name: Test host compatibility matrix\n        working-directory: release-source\n        run: |\n          set -euo pipefail\n          sudo make test-host-matrix\n      - name: Stage release artifacts\n", 1)
+	if workflow == original {
+		t.Fatal("mutation did not change the workflow")
+	}
+	writeReleaseWorkflows(t, root, workflow)
+	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "canonical release steps") {
+		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want matrix-in-build rejection", err)
+	}
+}
+
+func TestValidateReleaseWorkflowBoundaryRejectsPublishWithoutDigestVerification(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	original := validReleaseWorkflow(t)
+	start := strings.Index(original, "      - name: Verify release artifacts digest\n")
+	end := strings.Index(original, "      - name: Publish GitHub release\n")
+	if start < 0 || end < start {
+		t.Fatal("digest verification step not found")
+	}
+	workflow := original[:start] + original[end:]
+	writeReleaseWorkflows(t, root, workflow)
+	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "digest verification") {
+		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want missing digest verification rejection", err)
+	}
+}
+
+func TestValidateReleaseWorkflowBoundaryRejectsWeakenedDigestVerification(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	original := validReleaseWorkflow(t)
+	workflow := strings.Replace(original, "          test -n \"$EXPECTED_ARTIFACTS_SHA256\"\n", "", 1)
+	if workflow == original {
+		t.Fatal("mutation did not change the workflow")
+	}
+	writeReleaseWorkflows(t, root, workflow)
+	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "canonical verification command") {
+		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want weakened digest verification rejection", err)
+	}
+}
+
+func TestValidateReleaseWorkflowBoundaryRejectsHostMatrixWritePermission(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	original := validReleaseWorkflow(t)
+	workflow := strings.Replace(original, "  host-matrix:\n    needs: build\n    runs-on: ubuntu-24.04\n    permissions:\n      contents: read", "  host-matrix:\n    needs: build\n    runs-on: ubuntu-24.04\n    permissions:\n      contents: write", 1)
+	if workflow == original {
+		t.Fatal("mutation did not change the workflow")
+	}
+	writeReleaseWorkflows(t, root, workflow)
+	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "only contents read") {
+		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want host matrix write rejection", err)
+	}
+}
+
+func TestValidateReleaseWorkflowBoundaryRejectsHostMatrixExtraPermission(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	original := validReleaseWorkflow(t)
+	workflow := strings.Replace(original, "  host-matrix:\n    needs: build\n    runs-on: ubuntu-24.04\n    permissions:\n      contents: read", "  host-matrix:\n    needs: build\n    runs-on: ubuntu-24.04\n    permissions:\n      contents: read\n      id-token: write", 1)
+	if workflow == original {
+		t.Fatal("mutation did not change the workflow")
+	}
+	writeReleaseWorkflows(t, root, workflow)
+	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "only contents read") {
+		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want host matrix extra permission rejection", err)
+	}
+}
+
+func TestValidateReleaseWorkflowBoundaryRejectsPublishWithoutHostMatrixNeed(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	original := validReleaseWorkflow(t)
+	workflow := strings.Replace(original, "    needs: [build, host-matrix]\n", "    needs: [build]\n", 1)
+	if workflow == original {
+		t.Fatal("mutation did not change the workflow")
+	}
+	writeReleaseWorkflows(t, root, workflow)
+	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "host-matrix") {
+		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want publish needs rejection", err)
 	}
 }

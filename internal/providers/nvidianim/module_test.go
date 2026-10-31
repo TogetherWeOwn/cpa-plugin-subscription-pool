@@ -123,3 +123,9 @@ func TestRateReservationsAreAtomicAcrossConcurrentPicks(t *testing.T) {
 		t.Fatalf("admitted %d, want exactly 2", ok)
 	}
 }
+func TestMixedForeignCandidateFailsClosed(t *testing.T) {
+	m := setup(t, hostConfig(t), freeConfig)
+	r := req(m)
+	r.Candidates = append(r.Candidates, pluginapi.SchedulerAuthCandidate{ID: "foreign-auth", Provider: "openai-compatible-other"})
+	assertPick(t, m, r, false)
+}

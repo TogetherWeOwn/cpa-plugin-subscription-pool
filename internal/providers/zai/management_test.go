@@ -691,3 +691,33 @@ func TestManagementRefreshBoundedTimeout(t *testing.T) {
 		t.Fatalf("bounded refresh status=%d elapsed=%s", response.StatusCode, time.Since(started))
 	}
 }
+
+// The refresh route takes no parameters. A body carrying fields must be
+// refused before it spends a quota poll with the account's key, while an empty
+// body or an empty object still refreshes.
+func TestManagementRefreshRejectsNonEmptyBodyBeforePolling(t *testing.T) {
+	now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
+	item := account{Identity: accountIdentity("refresh-body"), Name: "account", KeySuffix: "redacted", Plan: "pro", FiveHourCredits: 12_000, WeeklyCredits: 60_000, key: quotaFixtureKey}
+	runtime := quotaTestRuntime(t, now, []account{item})
+	polls := 0
+	runtime.httpClient = roundTripDoer(func(*http.Request) (*http.Response, error) {
+		polls++
+		return quotaHTTPResponse(http.StatusBadGateway, ""), nil
+	})
+	for _, body := range []string{`{"account":"refresh-body"}`, `{"force":true}`, `[]`, `not-json`, `{} {}`} {
+		response := runtime.handleManagement(context.Background(), pluginapi.ManagementRequest{Method: http.MethodPost, Path: managementRefreshPath, Body: []byte(body)})
+		if response.StatusCode != http.StatusBadRequest || !strings.Contains(string(response.Body), "invalid_request") {
+			t.Fatalf("body %q: status = %d body = %s, want 400 invalid_request", body, response.StatusCode, response.Body)
+		}
+	}
+	if polls != 0 {
+		t.Fatalf("rejected refresh requests polled quota %d times", polls)
+	}
+	for _, body := range []string{"", " \n", "{}"} {
+		before := polls
+		response := runtime.handleManagement(context.Background(), pluginapi.ManagementRequest{Method: http.MethodPost, Path: managementRefreshPath, Body: []byte(body)})
+		if response.StatusCode == http.StatusBadRequest || polls == before {
+			t.Fatalf("body %q: status = %d polls %d -> %d, want a quota poll", body, response.StatusCode, before, polls)
+		}
+	}
+}

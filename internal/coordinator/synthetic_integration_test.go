@@ -105,9 +105,35 @@ func TestCoordinatorRegistersWithoutZaiAndRoutesSynthetic(t *testing.T) {
 
 	paid := pluginapi.SchedulerAuthCandidate{ID: "openai-compatibility:synthetic:08e39ede6b45", Provider: "openai-compatible-synthetic", Attributes: map[string]string{"compat_name": "synthetic"}}
 	infinite := pluginapi.SchedulerAuthCandidate{ID: "openai-compatibility:synthetic-infinite:x", Provider: "openai-compatible-synthetic-infinite", Priority: -1, Attributes: map[string]string{"compat_name": "synthetic-infinite"}}
+	// With no weekly reading yet the paid lane is refused; a fresh reading
+	// from a response header reopens it.
+	resp, err = c.Pick(pluginapi.SchedulerPickRequest{Stream: true, Candidates: []pluginapi.SchedulerAuthCandidate{paid, infinite}})
+	if err != nil || !resp.Handled || resp.AuthID != infinite.ID {
+		t.Fatalf("synthetic pick without a quota reading = %+v, %v; want infinite %s", resp, err, infinite.ID)
+	}
+	fresh := http.Header{"X-Synthetic-Quotas": {`{"planWeeklyLimit":{"percentRemaining":50,"nextRegenAt":"2099-01-01T00:00:00Z","nextRegenPercent":2}}`}}
+	if err := c.HandleUsage(pluginapi.UsageRecord{AuthID: paid.ID, Provider: "openai-compatible-synthetic", ResponseHeaders: fresh}); err != nil {
+		t.Fatal(err)
+	}
 	resp, err = c.Pick(pluginapi.SchedulerPickRequest{Stream: true, Candidates: []pluginapi.SchedulerAuthCandidate{paid, infinite}})
 	if err != nil || !resp.Handled || resp.AuthID != paid.ID {
 		t.Fatalf("synthetic pick = %+v, %v; want paid %s", resp, err, paid.ID)
+	}
+
+	// A foreign candidate sharing the alias fails closed through the
+	// coordinator, whether or not a paid lane is in the set.
+	foreign := pluginapi.SchedulerAuthCandidate{ID: "openai-compatibility:other:y", Provider: "openai-compatible-other", Attributes: map[string]string{"compat_name": "other"}}
+	for _, tc := range []struct {
+		candidates []pluginapi.SchedulerAuthCandidate
+		code       string
+	}{
+		{[]pluginapi.SchedulerAuthCandidate{paid, infinite, foreign}, "synthetic_foreign_candidate"},
+		{[]pluginapi.SchedulerAuthCandidate{infinite, foreign}, "coordinator_mixed_provider_pick"},
+	} {
+		resp, err = c.Pick(pluginapi.SchedulerPickRequest{Stream: true, Candidates: tc.candidates})
+		if err == nil || resp.Handled || !strings.Contains(err.Error(), tc.code) {
+			t.Fatalf("mixed synthetic pick = %+v, %v; want %s", resp, err, tc.code)
+		}
 	}
 
 	// A quota 429 learned through the coordinator's usage dispatch moves the

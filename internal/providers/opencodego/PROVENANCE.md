@@ -49,3 +49,9 @@ No credential is bound in any current sandbox. The module fails closed: an empty
 The initial poller above bound one `dashboard-api-key` to the whole module and polled it once per `Status()` call, writing that single snapshot into every configured account. This was wrong: `/zen/go/v1/usage` reports the usage of the credential making the request, not of "the module" -- three Go accounts with three different keys have three different usages, so broadcasting one account's poll result to all of them silently misreported the other two (confirmed live: go-1/go-2/go-3 all showed identical numbers on install while each account's own key returned its own real, different numbers on direct request).
 
 Fixed by moving `dashboard-api-key` onto `accounts[]` (falling back to the module-level key when an account omits its own, for the common case where accounts genuinely share one key) and polling each account with its own key, concurrently, each throttled independently by `minPollInterval`. One account's poll failure or missing key no longer affects any other account's result.
+
+## 2026-10-31 — Background poller
+
+Polling from `Status()` meant freshness depended on someone viewing status: with nobody viewing it, `threshold-percent` was never enforced, and an exhausted poll reading stayed in place past the window's reset. The unauthenticated usage resource also reaches `Status()`, so any caller could trigger outbound polls carrying the dashboard key.
+
+The module now starts a background poller on `Reconfigure` when an account has a dashboard key, polling every `quota-refresh-interval` (default `2m`, at least `30s`, `"0"` turns it off), and stops it in `Close`. `Status()` only reads cached state. A window whose reset time has passed is forgotten, so an exhausted or over-threshold reading never parks an account past its reset.

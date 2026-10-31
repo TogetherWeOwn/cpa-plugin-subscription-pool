@@ -501,15 +501,16 @@ func TestReasonAndSourceCodesAreAClosedVocabulary(t *testing.T) {
 	reasons := map[string]string{
 		"":    "",
 		"   ": "",
-		"exhausted until 2026-10-23T16:00:00Z: " + freeTextMarker:   "quota_exhausted",
-		"weekly credits 96.0% used, at or above the 95% threshold":  "at_threshold",
-		"paid concurrency cap 4 reached":                            "concurrency_cap",
-		"infinite concurrency cap 1 reached":                        "concurrency_cap",
-		"busy until 2026-10-23T15:10:00Z: " + freeTextMarker:        "resting",
-		"credential not bound to a known account " + freeTextMarker: "unbound_credential",
-		"no API key yet (placeholder): " + freeTextMarker:           "placeholder_key",
-		"upstream said " + freeTextMarker:                           "other",
-		freeTextMarker:                                              "other",
+		"exhausted until 2026-10-23T16:00:00Z: " + freeTextMarker:           "quota_exhausted",
+		"weekly credits 96.0% used, at or above the 95% threshold":          "at_threshold",
+		"quota reading stale: the last weekly credits reading is 11m0s old": "quota_unknown_or_stale",
+		"paid concurrency cap 4 reached":                                    "concurrency_cap",
+		"infinite concurrency cap 1 reached":                                "concurrency_cap",
+		"busy until 2026-10-23T15:10:00Z: " + freeTextMarker:                "resting",
+		"credential not bound to a known account " + freeTextMarker:         "unbound_credential",
+		"no API key yet (placeholder): " + freeTextMarker:                   "placeholder_key",
+		"upstream said " + freeTextMarker:                                   "other",
+		freeTextMarker:                                                      "other",
 	}
 	for text, want := range reasons {
 		if got := reasonCode(text); got != want {

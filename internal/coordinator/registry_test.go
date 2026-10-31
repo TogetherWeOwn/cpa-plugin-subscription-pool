@@ -126,6 +126,39 @@ func TestCoordinatorPickMixedProvidersFailsClosed(t *testing.T) {
 	}
 }
 
+// A module that recognizes only some of the candidates must explicitly pick
+// one of its own; declining or delegating to the host's scheduler (which
+// could choose a managed lane unguarded) fails closed.
+func TestCoordinatorPickPartialRecognitionRequiresOwnedPick(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		resp   pluginapi.SchedulerPickResponse
+		wantOK bool
+	}{
+		{"declines", pluginapi.SchedulerPickResponse{Handled: false}, false},
+		{"delegates", pluginapi.SchedulerPickResponse{Handled: true, DelegateBuiltin: pluginapi.SchedulerBuiltinRoundRobin}, false},
+		{"picks foreign", pluginapi.SchedulerPickResponse{Handled: true, AuthID: "other-auth"}, false},
+		{"picks owned", pluginapi.SchedulerPickResponse{Handled: true, AuthID: "alpha-1"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			alpha := &fakeModule{id: "alpha", recognize: recognizeID("alpha-"), pick: func(pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
+				return tc.resp, nil
+			}}
+			c := New(alpha)
+			resp, err := c.pick(pluginapi.SchedulerPickRequest{Candidates: []pluginapi.SchedulerAuthCandidate{{ID: "alpha-1"}, {ID: "other-auth"}}})
+			if tc.wantOK {
+				if err != nil || resp != tc.resp {
+					t.Fatalf("pick() = %#v, %v; want %#v", resp, err, tc.resp)
+				}
+				return
+			}
+			if err == nil || resp.Handled || !strings.Contains(err.Error(), "coordinator_mixed_provider_pick") {
+				t.Fatalf("pick() = %#v, %v; want coordinator_mixed_provider_pick", resp, err)
+			}
+		})
+	}
+}
+
 // A single recognizing module's Pick result (success or error) propagates
 // verbatim — this also covers invariant 5 (recognized-but-unmanaged/
 // all-impaired fails closed via the module's own error, not a coordinator

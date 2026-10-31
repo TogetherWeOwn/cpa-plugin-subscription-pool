@@ -45,7 +45,7 @@ func validateReleaseWorkflowShape(raw []byte) error {
 	if err != nil {
 		return err
 	}
-	if err := requireOnlyYAMLKeys(jobs, "release workflow jobs", "build", "publish"); err != nil {
+	if err := requireOnlyYAMLKeys(jobs, "release workflow jobs", "build", "host-matrix", "publish"); err != nil {
 		return err
 	}
 	build, err := yamlMapping(jobs["build"], "release build job")
@@ -59,11 +59,11 @@ func validateReleaseWorkflowShape(raw []byte) error {
 		return errors.New("release build job must use the approved runner")
 	}
 	outputs, err := yamlStringMap(build["outputs"], "release build outputs")
-	if err != nil || len(outputs) != 3 || outputs["version"] != "${{ steps.release.outputs.version }}" || outputs["tag"] != "${{ steps.target.outputs.tag }}" || outputs["tag_object"] != "${{ steps.target.outputs.tag_object }}" {
-		return errors.New("release build job must export only the validated version, tag, and tag object")
+	if err != nil || len(outputs) != 5 || outputs["version"] != "${{ steps.release.outputs.version }}" || outputs["tag"] != "${{ steps.target.outputs.tag }}" || outputs["tag_object"] != "${{ steps.target.outputs.tag_object }}" || outputs["release_sha"] != "${{ steps.release.outputs.release_sha }}" || outputs["artifacts_sha256"] != "${{ steps.stage.outputs.artifacts_sha256 }}" {
+		return errors.New("release build job must export only the validated version, tag, tag object, release SHA, and staged artifacts digest")
 	}
 	steps := build["steps"]
-	if steps == nil || steps.Kind != yaml.SequenceNode || len(steps.Content) != 14 {
+	if steps == nil || steps.Kind != yaml.SequenceNode || len(steps.Content) != 13 {
 		return errors.New("release build job must contain exactly the canonical release steps")
 	}
 	actions := map[int]string{
@@ -71,7 +71,7 @@ func validateReleaseWorkflowShape(raw []byte) error {
 		1:  "actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e",
 		4:  "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
 		7:  "golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a",
-		13: "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9",
+		12: "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9",
 	}
 	commands := map[int]canonicalRunStep{
 		2: {name: "Validate trusted release controls", workingDirectory: "release-controls", command: `set -euo pipefail
@@ -116,9 +116,7 @@ func validateReleaseWorkflowShape(raw []byte) error {
 			cmp "$library" <(unzip -p "$archive" subscription-pool.so)
 			go run -buildvcs=false ./.github/scripts/release-validation \
 			  -mode release -version "$VERSION" -tag "$RAW_TAG"`},
-		11: {name: "Test host compatibility matrix", workingDirectory: "release-source", env: map[string]string{"VERSION": "${{ steps.release.outputs.version }}", "HOST_MATRIX_NAMESPACE": "root"}, command: `set -euo pipefail
-			sudo --preserve-env=VERSION,HOST_MATRIX_NAMESPACE make test-host-matrix VERSION="$VERSION" OUT="dist/subscription-pool-v${VERSION}.so" HOST_IMAGES="$RUNNER_TEMP/host-images.json" HOST_MATRIX_WORK="$RUNNER_TEMP/host-matrix"`},
-		12: {name: "Stage release artifacts", workingDirectory: "release-source", env: map[string]string{"VERSION": "${{ steps.release.outputs.version }}", "RELEASE_SHA": "${{ steps.release.outputs.release_sha }}"}, command: `set -euo pipefail
+		11: {name: "Stage release artifacts", id: "stage", workingDirectory: "release-source", env: map[string]string{"VERSION": "${{ steps.release.outputs.version }}", "RELEASE_SHA": "${{ steps.release.outputs.release_sha }}"}, command: `set -euo pipefail
 			mkdir release-artifacts
 			cp "dist/subscription-pool-v${VERSION}.so" \
 			   "dist/subscription-pool_${VERSION}_linux_amd64.zip" \
@@ -138,7 +136,10 @@ func validateReleaseWorkflowShape(raw []byte) error {
 			   dist/README.md \
 			   dist/release-sha.txt \
 			   release-artifacts/
-			test "$(<release-artifacts/release-sha.txt)" = "$RELEASE_SHA"`},
+			test "$(<release-artifacts/release-sha.txt)" = "$RELEASE_SHA"
+			export LC_ALL=C
+			digest=$(cd release-artifacts && sha256sum -- * | sha256sum | cut -d' ' -f1)
+			printf 'artifacts_sha256=%s\n' "$digest" >> "$GITHUB_OUTPUT"`},
 	}
 	for index, node := range steps.Content {
 		step, err := yamlMapping(node, fmt.Sprintf("release build step %d", index+1))
@@ -155,9 +156,12 @@ func validateReleaseWorkflowShape(raw []byte) error {
 		if !ok {
 			return fmt.Errorf("release build step %d is not approved", index+1)
 		}
-		if err := validateReleaseCommandStep(raw, index, step, canonical); err != nil {
+		if err := validateReleaseCommandStep(raw, "release build", index, step, canonical); err != nil {
 			return err
 		}
+	}
+	if err := validateHostMatrixJob(raw, jobs["host-matrix"]); err != nil {
+		return err
 	}
 	return validatePublishJob(raw, jobs["publish"])
 }
@@ -190,7 +194,7 @@ func validateReleaseActionStep(index int, step map[string]*yaml.Node, approved s
 		if len(with) != 2 || with["version"] != "v2.13.2" || with["working-directory"] != "release-source" {
 			return errors.New("release lint must use only the immutable source checkout")
 		}
-	case 13:
+	case 12:
 		if len(with) != 4 || with["name"] != "release-artifacts" || with["path"] != "release-source/release-artifacts/" || with["if-no-files-found"] != "error" || with["retention-days"] != "1" {
 			return errors.New("release artifact upload must use only the canonical immutable-source inputs")
 		}
@@ -198,27 +202,95 @@ func validateReleaseActionStep(index int, step map[string]*yaml.Node, approved s
 	return nil
 }
 
-func validateReleaseCommandStep(raw []byte, index int, step map[string]*yaml.Node, canonical canonicalRunStep) error {
-	if err := requireOnlyYAMLKeys(step, fmt.Sprintf("release build step %d", index+1), "name", "id", "working-directory", "env", "run"); err != nil {
+func validateReleaseCommandStep(raw []byte, scope string, index int, step map[string]*yaml.Node, canonical canonicalRunStep) error {
+	if err := requireOnlyYAMLKeys(step, fmt.Sprintf("%s step %d", scope, index+1), "name", "id", "working-directory", "env", "run"); err != nil {
 		return err
 	}
 	if yamlScalarValue(step["name"]) != canonical.name || yamlScalarValue(step["id"]) != canonical.id || yamlScalarValue(step["working-directory"]) != canonical.workingDirectory {
-		return fmt.Errorf("release build step %d must use the canonical identity and working directory", index+1)
+		return fmt.Errorf("%s step %d must use the canonical identity and working directory", scope, index+1)
 	}
-	env, err := yamlStringMap(step["env"], fmt.Sprintf("release build step %d environment", index+1))
+	env, err := yamlStringMap(step["env"], fmt.Sprintf("%s step %d environment", scope, index+1))
 	if err != nil {
 		return err
 	}
 	if !equalStringMaps(env, canonical.env) {
-		return fmt.Errorf("release build step %d must use only the canonical environment", index+1)
+		return fmt.Errorf("%s step %d must use only the canonical environment", scope, index+1)
 	}
-	if err := requireCanonicalRunScalar(raw, step["run"], fmt.Sprintf("release build step %d", index+1)); err != nil {
+	if err := requireCanonicalRunScalar(raw, step["run"], fmt.Sprintf("%s step %d", scope, index+1)); err != nil {
 		return err
 	}
 	if normalizeShellCommand(yamlScalarValue(step["run"])) != normalizeShellCommand(canonical.command) {
-		return fmt.Errorf("release build step %d must use the canonical command", index+1)
+		return fmt.Errorf("%s step %d must use the canonical command", scope, index+1)
 	}
 	return nil
+}
+
+func validateHostMatrixJob(raw []byte, node *yaml.Node) error {
+	job, err := yamlMapping(node, "release host matrix job")
+	if err != nil {
+		return err
+	}
+	if err := requireOnlyYAMLKeys(job, "release host matrix job", "needs", "runs-on", "permissions", "steps"); err != nil {
+		return err
+	}
+	if yamlScalarValue(job["needs"]) != "build" || yamlScalarValue(job["runs-on"]) != "ubuntu-24.04" {
+		return errors.New("release host matrix job must depend only on build and use the approved runner")
+	}
+	permissions, err := yamlStringMap(job["permissions"], "release host matrix job permissions")
+	if err != nil || len(permissions) != 1 || permissions["contents"] != "read" {
+		return errors.New("release host matrix job must hold only contents read permission")
+	}
+	steps := job["steps"]
+	if steps == nil || steps.Kind != yaml.SequenceNode || len(steps.Content) != 4 {
+		return errors.New("release host matrix job must contain exactly the canonical checkout, Go setup, download, and matrix steps")
+	}
+	actions := map[int]string{
+		0: "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+		1: "actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e",
+		2: "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333",
+	}
+	names := []string{"Check out immutable release source", "Set up Go", "Download release artifacts"}
+	for index, approved := range actions {
+		step, err := yamlMapping(steps.Content[index], fmt.Sprintf("release host matrix step %d", index+1))
+		if err != nil {
+			return err
+		}
+		if err := requireOnlyYAMLKeys(step, fmt.Sprintf("release host matrix step %d", index+1), "name", "uses", "with"); err != nil {
+			return err
+		}
+		if yamlScalarValue(step["name"]) != names[index] || yamlScalarValue(step["uses"]) != approved {
+			return fmt.Errorf("release host matrix step %d must use the canonical pinned action", index+1)
+		}
+		with, err := yamlStringMap(step["with"], fmt.Sprintf("release host matrix action step %d inputs", index+1))
+		if err != nil {
+			return err
+		}
+		switch index {
+		case 0:
+			if len(with) != 4 || with["fetch-depth"] != "1" || with["persist-credentials"] != "false" || with["ref"] != "${{ needs.build.outputs.release_sha }}" || with["path"] != "release-source" {
+				return errors.New("host matrix checkout must use only the recorded release SHA without credentials")
+			}
+		case 1:
+			if len(with) != 3 || with["go-version-file"] != "release-source/go.mod" || with["cache-dependency-path"] != "release-source/go.sum" || with["cache"] != "true" {
+				return errors.New("host matrix Go setup must use only the release source module files")
+			}
+		case 2:
+			if len(with) != 2 || with["name"] != "release-artifacts" || with["path"] != "host-matrix-artifacts" {
+				return errors.New("host matrix artifact download must use only the canonical inputs outside the source checkout")
+			}
+		}
+	}
+	matrix, err := yamlMapping(steps.Content[3], "release host matrix command step")
+	if err != nil {
+		return err
+	}
+	return validateReleaseCommandStep(raw, "release host matrix", 3, matrix, canonicalRunStep{
+		name:             "Test host compatibility matrix",
+		workingDirectory: "release-source",
+		env:              map[string]string{"VERSION": "${{ needs.build.outputs.version }}", "HOST_MATRIX_NAMESPACE": "root"},
+		command: `set -euo pipefail
+			sudo --preserve-env=VERSION,HOST_MATRIX_NAMESPACE make test-host-matrix VERSION="$VERSION" OUT="$GITHUB_WORKSPACE/host-matrix-artifacts/subscription-pool-v${VERSION}.so" HOST_IMAGES="$GITHUB_WORKSPACE/host-matrix-artifacts/compatibility-evidence.json" HOST_MATRIX_WORK="$RUNNER_TEMP/host-matrix"`,
+	})
 }
 
 func validatePublishJob(raw []byte, node *yaml.Node) error {
@@ -229,16 +301,17 @@ func validatePublishJob(raw []byte, node *yaml.Node) error {
 	if err := requireOnlyYAMLKeys(publish, "release publish job", "needs", "runs-on", "permissions", "steps"); err != nil {
 		return err
 	}
-	if yamlScalarValue(publish["needs"]) != "build" || yamlScalarValue(publish["runs-on"]) != "ubuntu-24.04" {
-		return errors.New("release publish job must depend on build and use the approved runner")
+	needs, err := yamlStringSequence(publish["needs"], "release publish job needs")
+	if err != nil || len(needs) != 2 || needs[0] != "build" || needs[1] != "host-matrix" || yamlScalarValue(publish["runs-on"]) != "ubuntu-24.04" {
+		return errors.New("release publish job must depend on build and host-matrix and use the approved runner")
 	}
 	permissions, err := yamlStringMap(publish["permissions"], "release publish job permissions")
 	if err != nil || len(permissions) != 1 || permissions["contents"] != "write" {
 		return errors.New("release publish job must hold only contents write permission")
 	}
 	steps := publish["steps"]
-	if steps == nil || steps.Kind != yaml.SequenceNode || len(steps.Content) != 2 {
-		return errors.New("release publish job must contain exactly the artifact download and canonical publication steps")
+	if steps == nil || steps.Kind != yaml.SequenceNode || len(steps.Content) != 3 {
+		return errors.New("release publish job must contain exactly the artifact download, digest verification, and canonical publication steps")
 	}
 	download, err := yamlMapping(steps.Content[0], "release artifact download step")
 	if err != nil {
@@ -251,7 +324,29 @@ func validatePublishJob(raw []byte, node *yaml.Node) error {
 	if err != nil || yamlScalarValue(download["uses"]) != "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333" || len(with) != 2 || with["name"] != "release-artifacts" || with["path"] != "release-artifacts" {
 		return errors.New("release artifact download step must use the canonical action and inputs")
 	}
-	publication, err := yamlMapping(steps.Content[1], "release publication step")
+	verify, err := yamlMapping(steps.Content[1], "release artifact digest step")
+	if err != nil {
+		return err
+	}
+	if err := requireOnlyYAMLKeys(verify, "release artifact digest step", "name", "env", "run"); err != nil {
+		return err
+	}
+	verifyEnv, err := yamlStringMap(verify["env"], "release artifact digest environment")
+	if err != nil || yamlScalarValue(verify["name"]) != "Verify release artifacts digest" || len(verifyEnv) != 1 || verifyEnv["EXPECTED_ARTIFACTS_SHA256"] != "${{ needs.build.outputs.artifacts_sha256 }}" {
+		return errors.New("release artifact digest step must use the canonical name and environment")
+	}
+	if err := requireCanonicalRunScalar(raw, verify["run"], "release artifact digest step"); err != nil {
+		return err
+	}
+	const verifyCommand = `set -euo pipefail
+		export LC_ALL=C
+		test -n "$EXPECTED_ARTIFACTS_SHA256"
+		actual=$(cd release-artifacts && sha256sum -- * | sha256sum | cut -d' ' -f1)
+		test "$actual" = "$EXPECTED_ARTIFACTS_SHA256"`
+	if normalizeShellCommand(yamlScalarValue(verify["run"])) != normalizeShellCommand(verifyCommand) {
+		return errors.New("release artifact digest step must use the canonical verification command")
+	}
+	publication, err := yamlMapping(steps.Content[2], "release publication step")
 	if err != nil {
 		return err
 	}
