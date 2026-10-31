@@ -112,19 +112,19 @@ type stagedModule struct {
 
 // configRejectedError is the hard scheduler error pick returns while the
 // most recent configuration is rejected. It carries a stable wire code so
-// the ABI glue reports it as such instead of a generic plugin error.
+// the ABI glue reports it as such instead of a generic plugin error. The
+// wire message stays generic: the rejection reason can name config paths,
+// so it is kept to Error() and the management status.
 type configRejectedError struct{ reason string }
 
-func (e *configRejectedError) Error() string {
-	return "coordinator_config_rejected: " + e.message()
-}
+const configRejectedMessage = "plugin configuration was rejected; managed credentials stay blocked until a valid configuration is applied"
 
-func (e *configRejectedError) message() string {
-	return "plugin configuration was rejected; managed credentials stay blocked until a valid configuration is applied: " + e.reason
+func (e *configRejectedError) Error() string {
+	return "coordinator_config_rejected: " + configRejectedMessage + ": " + e.reason
 }
 
 func (e *configRejectedError) Coded() providermodule.WireError {
-	return providermodule.WireError{Code: "coordinator_config_rejected", Message: e.message()}
+	return providermodule.WireError{Code: "coordinator_config_rejected", Message: configRejectedMessage}
 }
 
 func (c *Coordinator) runtimeNow() time.Time {

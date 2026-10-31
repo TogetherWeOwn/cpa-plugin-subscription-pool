@@ -165,6 +165,9 @@ func TestRejectedConfigFailsClosedForGuardedCandidates(t *testing.T) {
 		if !errors.As(err, &rejected) || rejected.Coded().Code != "coordinator_config_rejected" {
 			t.Fatalf("Pick(%s) error = %v, want coordinator_config_rejected", candidate.ID, err)
 		}
+		if wire := rejected.Coded(); wire.Message != configRejectedMessage || !strings.Contains(err.Error(), rejected.reason) {
+			t.Fatalf("Pick(%s) wire = %+v, error = %v; want the generic wire message and the reason only in Error()", candidate.ID, wire, err)
+		}
 	}
 	if picked {
 		t.Fatal("a module's Pick ran while the config was rejected")
