@@ -77,29 +77,8 @@ func cliproxyPluginCall(method *C.char, request *C.uint8_t, requestLen C.size_t,
 	var raw []byte
 	var err error
 	switch C.GoString(method) {
-	case pluginabi.MethodPluginRegister:
-		lifecycle, errLifecycle := decodeLifecycle(payload)
-		if errLifecycle != nil {
-			raw = errorEnvelope("invalid_request", "request body is invalid")
-			break
-		}
-		if errConfig := runtimeState.Reconfigure(lifecycle.ConfigYAML); errConfig != nil {
-			raw = errorEnvelope("invalid_config", runtimeState.ValidationStatus())
-			break
-		}
-		raw, err = okEnvelope(pluginRegistration())
-	case pluginabi.MethodPluginReconfigure:
-		lifecycle, errLifecycle := decodeLifecycle(payload)
-		if errLifecycle != nil {
-			_ = runtimeState.RecordError(errLifecycle)
-			raw = errorEnvelope("invalid_request", "request body is invalid")
-			break
-		}
-		if errConfig := runtimeState.Reconfigure(lifecycle.ConfigYAML); errConfig != nil {
-			raw = errorEnvelope("invalid_config", runtimeState.ValidationStatus())
-			break
-		}
-		raw, err = okEnvelope(pluginRegistration())
+	case pluginabi.MethodPluginRegister, pluginabi.MethodPluginReconfigure:
+		raw, err = lifecycle(payload)
 	case pluginabi.MethodSchedulerPick:
 		raw, err = schedulerPick(payload)
 	case pluginabi.MethodUsageHandle:
@@ -122,6 +101,22 @@ func cliproxyPluginCall(method *C.char, request *C.uint8_t, requestLen C.size_t,
 	}
 	writeResponse(response, raw)
 	return 0
+}
+
+// lifecycle applies a register or reconfigure request. A rejected config
+// still answers with a valid registration: the host drops a plugin whose
+// register or reconfigure fails, which would hand scheduling of the managed
+// credentials back to the host. The plugin stays registered instead, the
+// coordinator fails every pick it recognizes closed until a valid config
+// arrives, and the management status route reports the rejection.
+func lifecycle(payload []byte) ([]byte, error) {
+	request, err := decodeLifecycle(payload)
+	if err != nil {
+		_ = runtimeState.RecordError(fmt.Errorf("lifecycle request body is invalid"))
+	} else {
+		_ = runtimeState.Reconfigure(request.ConfigYAML)
+	}
+	return okEnvelope(pluginRegistration())
 }
 
 type lifecycleRequest struct {

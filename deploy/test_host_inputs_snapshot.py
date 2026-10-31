@@ -28,6 +28,8 @@ GO_SCRIPT = ROOT / "deploy" / "verify-live-opencodego.sh"
 
 MANAGEMENT_MARKER = "fixture-management-marker"
 PLAN_MARKER = "fixture-plan-marker"
+# The host's /v0/management/plugins answer while the pool plugin is live.
+REGISTERED_PLUGIN_LISTING = {"plugins_enabled": True, "plugins": [{"id": "subscription-pool", "registered": True, "effective_enabled": True}]}
 
 # Exact record-key sets observed on the host (values below are synthetic).
 ZAI_RECORD_KEYS = (
@@ -188,6 +190,8 @@ class SnapshotHarness(unittest.TestCase):
                 "args = sys.argv[1:]\n"
                 'if "%{http_code}" in args:\n'
                 '    print("401", end="")\n'
+                'elif args[-1].endswith("/v0/management/plugins"):\n'
+                f"    print(json.dumps({REGISTERED_PLUGIN_LISTING!r}))\n"
                 "elif \"subscription-pool/status\" in \" \".join(args):\n"
                 f"    print(json.dumps({coordinator_payload!r}))\n"
                 "else:\n"

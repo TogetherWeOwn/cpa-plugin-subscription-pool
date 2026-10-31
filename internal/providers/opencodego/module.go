@@ -140,6 +140,7 @@ func (realClock) Sleep(ctx context.Context, delay time.Duration) error {
 var (
 	_ providermodule.Module          = (*Module)(nil)
 	_ providermodule.UsageAttributor = (*Module)(nil)
+	_ providermodule.ConfigValidator = (*Module)(nil)
 )
 
 func NewModule() *Module { return &Module{} }
@@ -207,6 +208,20 @@ func (m *Module) Reconfigure(_ context.Context, host providermodule.HostConfig, 
 		}
 	}
 	return nil
+}
+
+// ValidateConfig implements providermodule.ConfigValidator by building the
+// state Reconfigure would install, without installing it. A rejection is
+// recorded exactly as Reconfigure records it.
+func (m *Module) ValidateConfig(_ providermodule.HostConfig, providerConfig json.RawMessage) error {
+	cfg, err := parseConfig(providerConfig)
+	if err == nil {
+		_, err = buildState(cfg)
+	}
+	if err != nil {
+		m.recordError(err)
+	}
+	return err
 }
 
 func stateHasDashboardKey(state *moduleState) bool {
