@@ -327,8 +327,8 @@ make test
 make lint
 make test-release
 make validate-source
-make package VERSION=0.7.0
-make validate-release VERSION=0.7.0 TAG=v0.7.0
+make package VERSION=0.7.1
+make validate-release VERSION=0.7.1 TAG=v0.7.1
 (cd dist && sha256sum --check checksums.txt)
 ```
 

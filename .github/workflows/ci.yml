@@ -147,6 +147,23 @@ jobs:
           cmp "$library" <(unzip -p "$archive" subscription-pool.so)
           make validate-release VERSION=0.7.1 TAG=v0.7.1
 
+  # Deploy runbook, template and script tests (stdlib unittest, no network).
+  # No CLIProxy listens on a hosted runner, so a bypassed curl stub in the
+  # live-script tests cannot reach a live management API from here.
+  deploy-tests:
+    name: Deploy tests
+    needs: [changes]
+    if: needs.changes.outputs.docs_only != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run deploy tests
+        run: python3 -m unittest discover -s deploy -p 'test_*.py' -v
+
   # Host image compatibility matrix, shared with the standalone workflow so it
   # lives in one place and is covered by `ci-ok`.
   host-compat:
@@ -163,7 +180,7 @@ jobs:
   # above must be listed in `needs`.
   ci-ok:
     name: ci-ok
-    needs: [changes, secret-scan, quality, build, host-compat]
+    needs: [changes, secret-scan, quality, deploy-tests, build, host-compat]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -173,17 +190,18 @@ jobs:
           CHANGES: ${{ needs.changes.result }}
           SECRET_SCAN: ${{ needs.secret-scan.result }}
           QUALITY: ${{ needs.quality.result }}
+          DEPLOY_TESTS: ${{ needs.deploy-tests.result }}
           BUILD: ${{ needs.build.result }}
           HOST_COMPAT: ${{ needs.host-compat.result }}
         run: |
           set -euo pipefail
           status=0
-          for pair in "changes=$CHANGES" "secret-scan=$SECRET_SCAN" "quality=$QUALITY" "build=$BUILD" "host-compat=$HOST_COMPAT"; do
+          for pair in "changes=$CHANGES" "secret-scan=$SECRET_SCAN" "quality=$QUALITY" "deploy-tests=$DEPLOY_TESTS" "build=$BUILD" "host-compat=$HOST_COMPAT"; do
             name="${pair%%=*}"
             result="${pair#*=}"
             case "$name:$result" in
               changes:success|secret-scan:success) ;;
-              quality:success|quality:skipped|build:success|build:skipped|host-compat:success|host-compat:skipped) ;;
+              quality:success|quality:skipped|deploy-tests:success|deploy-tests:skipped|build:success|build:skipped|host-compat:success|host-compat:skipped) ;;
               *)
                 echo "::error::$name finished as $result"
                 status=1
