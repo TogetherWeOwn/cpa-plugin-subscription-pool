@@ -42,6 +42,7 @@ type Module struct {
 
 var _ providermodule.Module = (*Module)(nil)
 var _ providermodule.UsageAttributor = (*Module)(nil)
+var _ providermodule.ConfigValidator = (*Module)(nil)
 
 func NewModule() *Module       { return &Module{now: func() time.Time { return time.Now().UTC() }} }
 func (m *Module) ID() string   { return providerID }
@@ -95,6 +96,20 @@ func (m *Module) Reconfigure(_ context.Context, host providermodule.HostConfig, 
 	m.cfg, m.lanes, m.state, m.store, m.stateErr = cfg, lanes, state, store, false
 	if host.Clock != nil {
 		m.now = host.Clock.Now
+	}
+	return nil
+}
+
+// ValidateConfig implements providermodule.ConfigValidator: it runs the
+// parse and lane discovery Reconfigure would, without opening the
+// allowance store.
+func (m *Module) ValidateConfig(host providermodule.HostConfig, raw json.RawMessage) error {
+	cfg, err := parseConfig(raw)
+	if err != nil {
+		return err
+	}
+	if cfg.Enabled && len(discover(host, cfg)) > 0 && !filepath.IsAbs(host.AuthDir) {
+		return fmt.Errorf("nvidia_nim_state_unavailable: absolute auth-dir required")
 	}
 	return nil
 }

@@ -373,8 +373,37 @@ scan_decoded(status, markers)
 if not isinstance(status, dict) or status.get("plugin") != "subscription-pool":
     fail("coordinator status response is not the subscription-pool aggregate")
 providers=status.get("providers")
+if status.get("status") != "registered":
+    fail("coordinator status reports a rejected plugin config: managed credentials are blocked until it is fixed")
 if not isinstance(providers, dict) or not expected_providers.issubset(providers):
     fail("coordinator status response does not list both zai and opencode-go provider modules")
+PY
+
+# A plugin the host failed to register drops out of the host's plugin
+# snapshot, and its own status route vanishes with it, so ask the host
+# directly and treat a missing or inactive plugin as fatal: the managed
+# credentials would otherwise be scheduled without the pool.
+plugins_file="$work_dir/plugins.json"
+plugins_url="${CLIPROXY_MANAGEMENT_URL%/}/v0/management/plugins"
+curl -q --fail-with-body --fail-early --max-redirs 0 --silent --show-error \
+  --max-time 5 --max-filesize 1048576 --noproxy '*' --proxy '' \
+  --config "$curl_config" \
+  "$plugins_url" >"$plugins_file"
+
+python3 - "$plugins_file" <<'PY'
+import json, pathlib, sys
+def fail(message):
+    raise SystemExit(message)
+try:
+    listing=json.loads(pathlib.Path(sys.argv[1]).read_bytes())
+except (UnicodeDecodeError, json.JSONDecodeError):
+    fail("host plugin snapshot is not JSON")
+plugins=listing.get("plugins") if isinstance(listing, dict) else None
+if not isinstance(plugins, list):
+    fail("host plugin snapshot has no plugin list")
+entries=[plugin for plugin in plugins if isinstance(plugin, dict) and plugin.get("id") == "subscription-pool"]
+if len(entries) != 1 or entries[0].get("registered") is not True or entries[0].get("effective_enabled") is not True:
+    fail("host plugin snapshot does not show subscription-pool registered and enabled")
 PY
 
 if test -n "$CLIPROXY_DASHBOARD_URL"; then

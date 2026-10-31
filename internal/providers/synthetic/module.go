@@ -160,6 +160,7 @@ var (
 	_ providermodule.Module          = (*Module)(nil)
 	_ providermodule.UsageRecognizer = (*Module)(nil)
 	_ providermodule.UsageAttributor = (*Module)(nil)
+	_ providermodule.ConfigValidator = (*Module)(nil)
 )
 
 // NewModule constructs the synthetic module with a real clock and HTTP client.
@@ -306,6 +307,19 @@ func (m *Module) Reconfigure(_ context.Context, host providermodule.HostConfig, 
 		}
 	}
 	return nil
+}
+
+// ValidateConfig implements providermodule.ConfigValidator. Reconfigure
+// only rejects a config it cannot parse, so that is all this checks, and
+// the rejection is recorded exactly as Reconfigure records it.
+func (m *Module) ValidateConfig(_ providermodule.HostConfig, providerConfig json.RawMessage) error {
+	_, err := parseConfig(providerConfig)
+	if err != nil {
+		m.mu.Lock()
+		m.lastErr = bounded(err.Error(), 256)
+		m.mu.Unlock()
+	}
+	return err
 }
 
 // discoverLanes mirrors the host's credential synthesis for
