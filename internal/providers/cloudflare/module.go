@@ -431,6 +431,11 @@ func (m *Module) Pick(_ context.Context, req pluginapi.SchedulerPickRequest) (pl
 	}
 	for _, c := range req.Candidates {
 		if !m.ownsLocked(c) {
+			// Declining a mixed set hands our lanes to the host's scheduler,
+			// which has no PAYG guard, so the included-only mode refuses it.
+			if m.cfg.StayWithinIncluded {
+				return pluginapi.SchedulerPickResponse{}, capacityError("foreign_candidate")
+			}
 			return pluginapi.SchedulerPickResponse{Handled: false}, nil
 		}
 	}

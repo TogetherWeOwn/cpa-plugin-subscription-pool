@@ -8,6 +8,8 @@ claude-api-key:
     prefix: zai
 
 openai-compatibility:
+  # Keep aliases provider-prefixed. An alias shared between a pool-managed
+  # provider and an unmanaged one can fail with coordinator_mixed_provider_pick.
   # NVIDIA is initially blocked until account/model entitlement and permitted
   # trial use are verified below. Catalog presence alone is not free entitlement.
   - name: nvidia-nim

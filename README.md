@@ -14,6 +14,8 @@
 
 Modules with nothing configured are inactive and leave their providers to CLIProxyAPI's own scheduler. This repository was previously named `cpa-plugin-zai-coding-plan`.
 
+Give each managed provider its own model aliases. When an alias also maps to a provider no module manages, a request can carry both kinds of credential. The owning module must then pick one of its own credentials explicitly. Otherwise the request fails with `coordinator_mixed_provider_pick`, or with the module's own error (for example `synthetic_foreign_candidate` or `cloudflare_no_capacity: foreign_candidate`), so the host scheduler never routes managed credentials around their quota guards. Z.ai and OpenCode Go serve such requests from their own healthy credentials. synthetic.new, Cloudflare Workers AI and NVIDIA NIM refuse them.
+
 > [!IMPORTANT]
 > Do not deploy an untagged artifact as a release. A version is releasable only after the exact release commit passes CI, immutable-image compatibility, code-review, and security-review gates and its tag is published.
 

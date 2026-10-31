@@ -168,8 +168,11 @@ type Module interface {
 	// Reconfigure.
 	OwnedAuthIDs(ctx context.Context) []string
 	// Pick returns a scheduling decision for req. The coordinator only calls
-	// Pick after establishing, via Recognize, that this module (and no other)
-	// owns every candidate in req.
+	// Pick after establishing, via Recognize, that no other module recognizes any
+	// candidate in req. When req also holds candidates this module does not
+	// recognize, only an explicit pick of a recognized candidate is honored;
+	// declining, delegating to a built-in scheduler, or picking a foreign
+	// candidate fails the request closed.
 	Pick(ctx context.Context, req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error)
 	// HandleUsage records usage against the account owning record.AuthID.
 	// The coordinator only calls this for auth IDs the dispatch registry

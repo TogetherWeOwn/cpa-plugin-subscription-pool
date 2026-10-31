@@ -720,3 +720,24 @@ func TestUsageAccountNamesTheOwningAccount(t *testing.T) {
 		t.Fatalf("UsageAccount on an unconfigured module = %q, want empty", got)
 	}
 }
+
+func TestMixedForeignCandidateNeverPicksForeignOrExhaustedLane(t *testing.T) {
+	module := configuredModule(t, 97)
+	now := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
+	foreign := pluginapi.SchedulerAuthCandidate{ID: "foreign-auth", Provider: "openai-compatible-other"}
+	req := pluginapi.SchedulerPickRequest{
+		Options:    pluginapi.SchedulerOptions{Metadata: map[string]any{"now": now}},
+		Candidates: []pluginapi.SchedulerAuthCandidate{{ID: "go-a-1"}, foreign},
+	}
+	resp, err := module.Pick(context.Background(), req)
+	if err != nil || !resp.Handled || resp.AuthID != "go-a-1" {
+		t.Fatalf("Pick() = %#v, %v; want owned lane go-a-1", resp, err)
+	}
+	if err := module.HandleUsage(context.Background(), monthlyLimitRecord("go-a-1", now, 3600)); err != nil {
+		t.Fatal(err)
+	}
+	resp, err = module.Pick(context.Background(), req)
+	if err == nil || resp.Handled || !strings.Contains(err.Error(), "opencode_go_no_capacity") {
+		t.Fatalf("Pick() = %#v, %v; want opencode_go_no_capacity", resp, err)
+	}
+}

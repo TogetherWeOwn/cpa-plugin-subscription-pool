@@ -110,6 +110,22 @@ func TestCoordinatorRegistersWithoutZaiAndRoutesSynthetic(t *testing.T) {
 		t.Fatalf("synthetic pick = %+v, %v; want paid %s", resp, err, paid.ID)
 	}
 
+	// A foreign candidate sharing the alias fails closed through the
+	// coordinator, whether or not a paid lane is in the set.
+	foreign := pluginapi.SchedulerAuthCandidate{ID: "openai-compatibility:other:y", Provider: "openai-compatible-other", Attributes: map[string]string{"compat_name": "other"}}
+	for _, tc := range []struct {
+		candidates []pluginapi.SchedulerAuthCandidate
+		code       string
+	}{
+		{[]pluginapi.SchedulerAuthCandidate{paid, infinite, foreign}, "synthetic_foreign_candidate"},
+		{[]pluginapi.SchedulerAuthCandidate{infinite, foreign}, "coordinator_mixed_provider_pick"},
+	} {
+		resp, err = c.Pick(pluginapi.SchedulerPickRequest{Stream: true, Candidates: tc.candidates})
+		if err == nil || resp.Handled || !strings.Contains(err.Error(), tc.code) {
+			t.Fatalf("mixed synthetic pick = %+v, %v; want %s", resp, err, tc.code)
+		}
+	}
+
 	// A quota 429 learned through the coordinator's usage dispatch moves the
 	// shared alias to infinite mode.
 	header := http.Header{"X-Synthetic-Quotas": {`{"planWeeklyLimit":{"percentRemaining":0,"nextRegenAt":"2099-01-01T00:00:00Z","nextRegenPercent":2}}`}}

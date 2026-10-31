@@ -430,3 +430,16 @@ func assertSchedulerError(t *testing.T, err error, code string) {
 		t.Fatalf("error = %T %v, want non-retryable %s", err, err, code)
 	}
 }
+
+func TestSchedulerMixedForeignCandidateNeverPicksForeignOrImpairedLane(t *testing.T) {
+	impaired := schedulerAccount("impaired", "claude-bad", "openai-bad")
+	healthy := schedulerAccount("healthy", "claude-good", "openai-good")
+	runtime := schedulerTestRuntime(schedulerNow, impaired, healthy)
+	mustHandleUsage(t, runtime, pluginapi.UsageRecord{AuthID: impaired.ClaudeAuthID, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: http.StatusUnauthorized}})
+	for i := 0; i < 3; i++ {
+		response, err := runtime.pick(schedulerRequest(impaired.ClaudeAuthID, "foreign-auth", healthy.ClaudeAuthID))
+		if err != nil || response.AuthID != healthy.ClaudeAuthID {
+			t.Fatalf("mixed pick = %#v, err = %v; want %s", response, err, healthy.ClaudeAuthID)
+		}
+	}
+}

@@ -396,8 +396,9 @@ func (m *Module) OwnedAuthIDs(context.Context) []string {
 //  3. otherwise a 429-coded rejection, so the request never spills into
 //     usage-based billing and never trips the host's own cooldowns.
 //
-// Candidates belonging to another provider make the pick ambiguous, so the
-// module declines (Handled:false) and the host's scheduler decides.
+// Candidates belonging to another provider make the pick ambiguous. With a
+// paid credential among them the module fails closed; otherwise it declines
+// (Handled:false), which the coordinator also fails closed for a mixed set.
 func (m *Module) Pick(_ context.Context, req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
 	now := requestTime(req, m.clock())
 	m.mu.Lock()
@@ -405,21 +406,31 @@ func (m *Module) Pick(_ context.Context, req pluginapi.SchedulerPickRequest) (pl
 	if !m.activeLocked() {
 		return pluginapi.SchedulerPickResponse{Handled: false}, nil
 	}
-	var paid, infinite []*lane
-	for _, candidate := range req.Candidates {
+	foreign, hasPaid := false, false
+	kinds := make([]laneKind, len(req.Candidates))
+	for i, candidate := range req.Candidates {
 		kind, ok := m.kindOfLocked(candidate)
-		if !ok {
-			return pluginapi.SchedulerPickResponse{Handled: false}, nil
-		}
-		item := m.laneForCandidateLocked(candidate, kind)
-		if kind == kindPaid {
+		foreign = foreign || !ok
+		hasPaid = hasPaid || kind == kindPaid
+		kinds[i] = kind
+	}
+	if foreign && hasPaid {
+		// Declining would let the host's scheduler pick a paid lane with no
+		// threshold check, so a paid lane mixed with a foreign one is refused.
+		m.routing.Rejections++
+		return pluginapi.SchedulerPickResponse{}, newSchedulerError("synthetic_foreign_candidate", "candidates mix synthetic.new paid credentials with another provider")
+	}
+	if foreign || len(req.Candidates) == 0 {
+		return pluginapi.SchedulerPickResponse{Handled: false}, nil
+	}
+	var paid, infinite []*lane
+	for i, candidate := range req.Candidates {
+		item := m.laneForCandidateLocked(candidate, kinds[i])
+		if kinds[i] == kindPaid {
 			paid = append(paid, item)
 		} else {
 			infinite = append(infinite, item)
 		}
-	}
-	if len(paid) == 0 && len(infinite) == 0 {
-		return pluginapi.SchedulerPickResponse{Handled: false}, nil
 	}
 	sortLanes(paid)
 	sortLanes(infinite)
