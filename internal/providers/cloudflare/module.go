@@ -240,8 +240,8 @@ func (m *Module) Reconfigure(_ context.Context, host providermodule.HostConfig, 
 }
 
 // ValidateConfig implements providermodule.ConfigValidator: it runs the
-// parse and lane discovery Reconfigure would, without opening the budget
-// store or changing live lanes.
+// parse, lane discovery and auth-dir checks Reconfigure would, without
+// opening the budget store or changing live lanes.
 func (m *Module) ValidateConfig(host providermodule.HostConfig, raw json.RawMessage) error {
 	cfg, err := parseConfig(raw)
 	if err != nil {
@@ -251,8 +251,16 @@ func (m *Module) ValidateConfig(host providermodule.HostConfig, raw json.RawMess
 	if err != nil {
 		return err
 	}
-	if cfg.Enabled && len(lanes) > 0 && (host.AuthDir == "" || !filepath.IsAbs(host.AuthDir)) {
+	if !cfg.Enabled || len(lanes) == 0 {
+		return nil
+	}
+	if host.AuthDir == "" || !filepath.IsAbs(host.AuthDir) {
 		return fmt.Errorf("cloudflare_invalid_config: absolute auth-dir is required")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.store != nil && m.store.Dir() != filepath.Join(host.AuthDir, "providers", providerID) {
+		return fmt.Errorf("cloudflare_invalid_config: auth-dir cannot change while module is running")
 	}
 	return nil
 }

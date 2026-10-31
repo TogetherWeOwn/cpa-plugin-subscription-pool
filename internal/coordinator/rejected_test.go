@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 
@@ -177,5 +178,72 @@ func TestRecordedLifecycleErrorFailsClosed(t *testing.T) {
 	_ = c.RecordError(fmt.Errorf("lifecycle request body is invalid"))
 	if _, err := c.Pick(pluginapi.SchedulerPickRequest{Candidates: []pluginapi.SchedulerAuthCandidate{{ID: "alpha-1"}}}); err == nil {
 		t.Fatal("Pick after an undecodable lifecycle request = nil error, want fail closed")
+	}
+}
+
+// blockingReconfigure returns a reconfigure hook that, once armed, signals
+// entered and blocks until release is closed.
+func blockingReconfigure(armed *bool, entered chan<- struct{}, release <-chan struct{}) func(json.RawMessage) error {
+	return func(json.RawMessage) error {
+		if *armed {
+			entered <- struct{}{}
+			<-release
+		}
+		return nil
+	}
+}
+
+func TestPickWaitsForAnInFlightCommit(t *testing.T) {
+	armed := false
+	entered, release := make(chan struct{}), make(chan struct{})
+	alpha := &stagingFakeModule{fakeModule: fakeModule{id: "alpha", recognize: recognizeID("alpha-")}, reconfigure: blockingReconfigure(&armed, entered, release)}
+	beta := &stagingFakeModule{fakeModule: fakeModule{id: "beta"}, reconfigure: rejectVersion("2")}
+	c := New(alpha, beta)
+	if err := c.Reconfigure(poolConfig(t, 1, "alpha", "beta")); err != nil {
+		t.Fatalf("Reconfigure(v1) error = %v", err)
+	}
+	armed = true
+	go func() { _ = c.Reconfigure(poolConfig(t, 2, "alpha", "beta")) }()
+	<-entered
+
+	picked := make(chan error, 1)
+	go func() {
+		_, err := c.Pick(pluginapi.SchedulerPickRequest{Candidates: []pluginapi.SchedulerAuthCandidate{{ID: "alpha-1"}}})
+		picked <- err
+	}()
+	select {
+	case err := <-picked:
+		t.Fatalf("Pick returned (%v) while modules were mid-commit", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	armed = false
+	close(release)
+	if err := <-picked; err == nil {
+		t.Fatal("Pick after the failed commit = nil error, want the rejection")
+	}
+}
+
+func TestOlderReconfigureCannotClearANewerRejection(t *testing.T) {
+	armed := false
+	entered, release := make(chan struct{}), make(chan struct{})
+	alpha := &stagingFakeModule{fakeModule: fakeModule{id: "alpha", recognize: recognizeID("alpha-")}, reconfigure: blockingReconfigure(&armed, entered, release)}
+	c := New(alpha)
+	armed = true
+	done := make(chan error, 1)
+	go func() { done <- c.Reconfigure(poolConfig(t, 1, "alpha")) }()
+	<-entered
+	recorded := make(chan struct{})
+	go func() {
+		_ = c.RecordError(fmt.Errorf("lifecycle request body is invalid"))
+		close(recorded)
+	}()
+	armed = false
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("Reconfigure(v1) error = %v", err)
+	}
+	<-recorded
+	if _, err := c.Pick(pluginapi.SchedulerPickRequest{Candidates: []pluginapi.SchedulerAuthCandidate{{ID: "alpha-1"}}}); err == nil {
+		t.Fatal("Pick = nil error: the earlier reconfigure cleared the later rejection")
 	}
 }

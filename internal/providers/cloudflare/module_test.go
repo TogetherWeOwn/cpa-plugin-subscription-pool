@@ -314,6 +314,7 @@ func TestValidateConfigMatchesReconfigureWithoutApplying(t *testing.T) {
 	noKeys := testHost(h.AuthDir)
 	noKeys.OpenAICompatibility[0].APIKeyEntries = nil
 	relative := testHost("relative/auth")
+	moved := testHost(t.TempDir())
 	for name, tc := range map[string]struct {
 		host providermodule.HostConfig
 		raw  string
@@ -322,12 +323,13 @@ func TestValidateConfigMatchesReconfigureWithoutApplying(t *testing.T) {
 		"no api key entry":  {noKeys, `{}`},
 		"guard disabled":    {h, `{"enabled":false}`},
 		"relative auth dir": {relative, `{}`},
+		"auth dir moved":    {moved, `{}`},
 	} {
 		validateErr := m.ValidateConfig(tc.host, json.RawMessage(tc.raw))
 		if validateErr == nil {
 			t.Errorf("%s: ValidateConfig accepted a config Reconfigure rejects", name)
 		}
-		if err := NewModule().Reconfigure(context.Background(), tc.host, json.RawMessage(tc.raw)); err == nil {
+		if err := m.Reconfigure(context.Background(), tc.host, json.RawMessage(tc.raw)); err == nil {
 			t.Errorf("%s: Reconfigure accepted the config ValidateConfig rejected (%v)", name, validateErr)
 		}
 	}

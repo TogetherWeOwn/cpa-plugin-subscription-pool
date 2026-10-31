@@ -46,12 +46,17 @@ type Coordinator struct {
 
 	registry registry
 
-	// reconfigureMu serializes reconfigures, so staging, committing and
-	// rolling back modules never interleave. applied records the config
-	// each module last accepted in a fully successful reconfigure, so a
-	// commit that fails part-way can restore the modules it already changed.
+	// reconfigureMu serializes lifecycle requests end to end, so an older
+	// reconfigure can never clear the rejection a newer one recorded, and
+	// staging, committing and rolling back modules never interleave.
+	// applied records the config each module last accepted in a fully
+	// successful reconfigure, so a commit that fails part-way can restore
+	// the modules it already changed.
 	reconfigureMu sync.Mutex
 	applied       map[string]appliedConfig
+	// commitMu makes picks wait while modules are being committed or
+	// rolled back, so no pick ever sees modules on mixed configs.
+	commitMu sync.RWMutex
 
 	reconfigures sync.WaitGroup
 	// usage counts handleUsage calls in progress; Shutdown waits for them
@@ -123,6 +128,9 @@ func (c *Coordinator) runtimeNow() time.Time {
 // i.e. the plugin's own providers.* subtree) to every hosted module and
 // rebuilds the dispatch registry from their post-reconfigure ownership.
 func (c *Coordinator) reconfigure(rawConfig []byte) error {
+	c.reconfigureMu.Lock()
+	defer c.reconfigureMu.Unlock()
+
 	cfg, err := parseCoordinatorConfig(rawConfig)
 	if err != nil {
 		return c.recordError(err)
@@ -157,9 +165,6 @@ func (c *Coordinator) reconfigure(rawConfig []byte) error {
 	c.mu.Unlock()
 	defer c.reconfigures.Done()
 
-	c.reconfigureMu.Lock()
-	defer c.reconfigureMu.Unlock()
-
 	host := providermodule.HostConfig{
 		CPAConfigPath:       configPath,
 		AuthDir:             pluginAuthDir,
@@ -189,6 +194,9 @@ func (c *Coordinator) reconfigure(rawConfig []byte) error {
 
 	// Commit. A module can still fail here (storage, shutdown); the modules
 	// already committed are then restored to their last accepted config.
+	// Picks wait until the outcome, rejection included, is published.
+	c.commitMu.Lock()
+	defer c.commitMu.Unlock()
 	for i, next := range staged {
 		if err := next.entry.module.Reconfigure(context.Background(), host, next.providerConfig); err != nil {
 			c.rollback(staged[:i])
@@ -229,7 +237,8 @@ func (c *Coordinator) reconfigure(rawConfig []byte) error {
 // rollback restores each committed module to the config it last accepted.
 // It is best effort: a module with no accepted config, or one that refuses
 // its old config, keeps whatever it has, and the coordinator's rejected
-// mode keeps pick failing closed either way. Callers hold reconfigureMu.
+// mode keeps pick failing closed either way. Callers hold reconfigureMu and
+// commitMu.
 func (c *Coordinator) rollback(committed []stagedModule) {
 	for _, next := range committed {
 		previous, ok := c.applied[next.entry.id]
@@ -268,6 +277,8 @@ func (c *Coordinator) validationStatus() string {
 // own Pick result (including its unmanaged/no-capacity errors) is
 // propagated verbatim.
 func (c *Coordinator) pick(req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
+	c.commitMu.RLock()
+	defer c.commitMu.RUnlock()
 	c.mu.RLock()
 	stopped, rejected := c.stopped, c.lastErr
 	c.mu.RUnlock()
@@ -432,8 +443,13 @@ func (c *Coordinator) HandleUsage(record pluginapi.UsageRecord) error { return c
 func (c *Coordinator) Shutdown() error { return c.shutdown() }
 
 // RecordError is the exported entry point src/'s CGo ABI glue calls to
-// record a lifecycle-request decode failure.
-func (c *Coordinator) RecordError(err error) error { return c.recordError(err) }
+// record a lifecycle-request decode failure. It is ordered with reconfigures
+// like any other lifecycle request.
+func (c *Coordinator) RecordError(err error) error {
+	c.reconfigureMu.Lock()
+	defer c.reconfigureMu.Unlock()
+	return c.recordError(err)
+}
 
 // ValidationStatus is the exported entry point src/'s CGo ABI glue calls to
 // report the plugin's own reconfigure-rejection status.
