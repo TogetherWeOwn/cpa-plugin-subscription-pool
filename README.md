@@ -159,8 +159,8 @@ Owner key instructions are in [`deploy/NVIDIA-OWNER-KEY.txt`](deploy/NVIDIA-OWNE
 Release assets use one version consistently:
 
 ```text
-subscription-pool-v0.7.0.so
-subscription-pool_0.7.0_linux_amd64.zip
+subscription-pool-v0.7.1.so
+subscription-pool_0.7.1_linux_amd64.zip
 checksums.txt
 ```
 
@@ -169,14 +169,14 @@ checksums.txt
 Download the versioned shared library and `checksums.txt` from the same GitHub release, then verify before installation:
 
 ```sh
-version=0.7.0
+version=0.7.1
 sha256sum --check checksums.txt
 install -m 0755 "subscription-pool-v${version}.so" /path/to/cliproxy/plugins/linux/amd64/
 ```
 
 ### Install the plugin-store archive
 
-Verify `checksums.txt`, then supply `subscription-pool_0.7.0_linux_amd64.zip` to the CLIProxyAPI plugin-store flow. The archive contains exactly one root-level entry named `subscription-pool.so`.
+Verify `checksums.txt`, then supply `subscription-pool_0.7.1_linux_amd64.zip` to the CLIProxyAPI plugin-store flow. The archive contains exactly one root-level entry named `subscription-pool.so`.
 
 Use the host's supported reload procedure after changing the native plugin (or restart only when the tested host requires it). Confirm registration and all three capabilities before sending traffic. The release is not valid until CI passes the immutable host matrix: the deployed digest from [`deploy/deployed-host-image.json`](deploy/deployed-host-image.json), the latest `eceasy/cli-proxy-api` tag resolved to its linux/amd64 manifest at run time, and the historical baseline from [`.github/host-images.json`](.github/host-images.json).
 

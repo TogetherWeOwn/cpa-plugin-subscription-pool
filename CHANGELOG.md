@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-10-31
+
 ### Added
 
 - `coexisting-plugins` coordinator key: plugin IDs the operator confirms register no Scheduler (provider-only plugins such as `synthetic`, `nvidia-nim`, `cloudflare-workers-ai`). Listed plugins may stay enabled alongside `subscription-pool` if they sort after it in host order (priority below 1000, or 1000 with a larger ID). Previously any other enabled plugin failed reconfigure with "must be the sole enabled scheduler plugin" and dropped every pool account. Unlisted enabled plugins still fail closed. A provider plugin that serves a pool module's provider ID needs that module disabled (`providers.<id>.enabled: false`).
@@ -165,7 +167,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Raw plan keys, authorization headers, request bodies, and management credentials are excluded from persistent state, logs, and status responses; persistence uses only derived account identities and redacted state.
 - State and settings commits are atomic, redacted, and recovered fail-closed after interrupted writes.
 
-[Unreleased]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/releases/tag/v0.7.1
 [0.7.0]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/releases/tag/v0.7.0
 [0.6.1]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/releases/tag/v0.6.1
 [0.6.0]: https://github.com/TogetherWeOwn/cpa-plugin-subscription-pool/releases/tag/v0.6.0
