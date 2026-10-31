@@ -532,6 +532,10 @@ func (m *Module) soleAccountForProviderLocked(provider string) string {
 // spend cannot be checked against any account's weekly credits.
 const unboundPaidReason = "credential not bound to a known synthetic.new account (re-keyed or added after the last reconfigure), so its weekly credits cannot be checked"
 
+// unknownQuotaReason explains why a paid credential with no weekly reading
+// yet is refused.
+const unknownQuotaReason = "quota reading missing: no weekly credits reading yet (quota poll or x-synthetic-quotas header), so the threshold cannot be checked"
+
 func (m *Module) paidAvailableLocked(item *lane, now time.Time) (bool, string) {
 	if busy, why := laneBusy(item, now); busy {
 		return false, why
@@ -544,13 +548,23 @@ func (m *Module) paidAvailableLocked(item *lane, now time.Time) (bool, string) {
 		// rejection, takes the request until the next Reconfigure binds it.
 		return false, unboundPaidReason
 	}
-	if acct := m.accounts[item.Account]; acct != nil {
-		if acct.exhaustedUntil.After(now) {
-			return false, "exhausted until " + acct.exhaustedUntil.Format(time.RFC3339) + ": " + acct.exhaustedWhy
-		}
-		if used, known := effectiveUtilization(acct, now); known && used*100 >= float64(m.cfg.ThresholdPercent) {
-			return false, fmt.Sprintf("weekly credits %.1f%% used, at or above the %d%% threshold", used*100, m.cfg.ThresholdPercent)
-		}
+	acct := m.accounts[item.Account]
+	if acct != nil && acct.exhaustedUntil.After(now) {
+		return false, "exhausted until " + acct.exhaustedUntil.Format(time.RFC3339) + ": " + acct.exhaustedWhy
+	}
+	// Fail closed: without a fresh weekly reading the threshold cannot be
+	// checked, and admitting the paid credential could spill into
+	// usage-based billing. Infinite mode, or a 429-coded rejection, takes
+	// the request until a poll or response header brings a fresh reading.
+	used, known := effectiveUtilization(acct, now)
+	if !known {
+		return false, unknownQuotaReason
+	}
+	if age, maxAge := now.Sub(acct.Weekly.ObservedAt), m.cfg.quotaMaxAge(); age > maxAge {
+		return false, fmt.Sprintf("quota reading stale: the last weekly credits reading is %s old (quota-max-age %s), so the threshold cannot be checked", age.Round(time.Second), maxAge)
+	}
+	if used*100 >= float64(m.cfg.ThresholdPercent) {
+		return false, fmt.Sprintf("weekly credits %.1f%% used, at or above the %d%% threshold", used*100, m.cfg.ThresholdPercent)
 	}
 	if limit := m.cfg.MaxConcurrent; limit > 0 && m.inFlightLocked(item, now) >= limit {
 		return false, fmt.Sprintf("paid concurrency cap %d reached", limit)

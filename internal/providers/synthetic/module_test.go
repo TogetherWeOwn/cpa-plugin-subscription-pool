@@ -118,6 +118,19 @@ func quotaHeaderValue(remaining float64, regenAt time.Time) http.Header {
 	return http.Header{"X-Synthetic-Quotas": {string(raw)}}
 }
 
+// freshReading records a weekly reading taken at the clock's current time, as
+// an infinite-mode response header would, so the paid lane has the fresh
+// quota it needs to be admitted. It leaves the paid lane's in-flight slots alone.
+func freshReading(t *testing.T, m *Module, clock *fakeClock, remaining float64) {
+	t.Helper()
+	record := usage(infiniteAuthID, http.StatusOK, quotaHeaderValue(remaining, clock.Now().Add(time.Hour)))
+	record.Provider = "openai-compatible-synthetic-infinite"
+	record.RequestedAt = clock.Now()
+	if err := m.HandleUsage(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func statusOf(t *testing.T, m *Module) map[string]any {
 	t.Helper()
 	raw, err := m.Status(context.Background())
@@ -174,7 +187,8 @@ func TestRecognizeByProviderAttributes(t *testing.T) {
 }
 
 func TestPaidPreferredWhileHealthy(t *testing.T) {
-	m, _ := newTestModule(t, "{}")
+	m, clock := newTestModule(t, "{}")
+	freshReading(t, m, clock, 50)
 	for i := 0; i < 3; i++ {
 		if got := mustPick(t, m, pickReq(true, both()...)); got != paidAuthID {
 			t.Fatalf("pick %d = %s, want paid", i, got)
@@ -243,7 +257,12 @@ func TestQuota429ExhaustsUntilRegeneration(t *testing.T) {
 }
 
 func Test402WithoutHeaderUsesFailureCooldown(t *testing.T) {
-	m, clock := newTestModule(t, `{"failure-cooldown":"10m"}`)
+	m, clock := newTestModule(t, `{"failure-cooldown":"10m","quota-max-age":"30m"}`)
+	// A reading with no regeneration tick ahead, so the 402 falls back to
+	// failure-cooldown.
+	reading := usage(infiniteAuthID, http.StatusOK, quotaHeaderValue(50, testStart))
+	reading.Provider = "openai-compatible-synthetic-infinite"
+	_ = m.HandleUsage(context.Background(), reading)
 	_ = m.HandleUsage(context.Background(), usage(paidAuthID, http.StatusPaymentRequired, nil))
 	if got := mustPick(t, m, pickReq(true, both()...)); got != infiniteAuthID {
 		t.Fatalf("pick after 402 = %s, want infinite", got)
@@ -287,7 +306,8 @@ func TestBothUnavailableRejectsWithBothReasons(t *testing.T) {
 }
 
 func TestConcurrencyCapOverflowsToInfinite(t *testing.T) {
-	m, _ := newTestModule(t, `{"max-concurrent":1}`)
+	m, clock := newTestModule(t, `{"max-concurrent":1}`)
+	freshReading(t, m, clock, 50)
 	if got := mustPick(t, m, pickReq(true, both()...)); got != paidAuthID {
 		t.Fatalf("first pick = %s", got)
 	}
@@ -301,7 +321,8 @@ func TestConcurrencyCapOverflowsToInfinite(t *testing.T) {
 }
 
 func TestInFlightSlotsExpire(t *testing.T) {
-	m, clock := newTestModule(t, `{"max-concurrent":1,"in-flight-ttl":"10m"}`)
+	m, clock := newTestModule(t, `{"max-concurrent":1,"in-flight-ttl":"10m","quota-max-age":"1h"}`)
+	freshReading(t, m, clock, 50)
 	mustPick(t, m, pickReq(true, both()...))
 	if got := mustPick(t, m, pickReq(true, both()...)); got != infiniteAuthID {
 		t.Fatalf("pick at cap = %s", got)
@@ -318,6 +339,50 @@ func TestInfiniteConcurrencyCap(t *testing.T) {
 	mustPick(t, m, pickReq(true, only))
 	if _, err := m.Pick(context.Background(), pickReq(true, only)); err == nil || !strings.Contains(err.Error(), "infinite concurrency cap 1") {
 		t.Fatalf("second infinite pick error = %v", err)
+	}
+}
+
+// TestPaidLaneRefusedWithoutQuotaReading is a regression test: with no weekly
+// reading at all (polling off or failing, no x-synthetic-quotas header) the
+// threshold cannot be checked, so the paid lane is never admitted.
+func TestPaidLaneRefusedWithoutQuotaReading(t *testing.T) {
+	m, _ := newTestModule(t, `{"quota-refresh-interval":"0"}`)
+	for i := 0; i < 1000; i++ {
+		if got := mustPick(t, m, pickReq(true, both()...)); got != infiniteAuthID {
+			t.Fatalf("pick %d with unknown quota = %s, want infinite", i, got)
+		}
+	}
+	_, err := m.Pick(context.Background(), pickReq(true, candidate(paidAuthID, "synthetic")))
+	if err == nil || !strings.Contains(err.Error(), "synthetic_no_capacity") || !strings.Contains(err.Error(), "quota reading missing") {
+		t.Fatalf("paid-only pick with unknown quota error = %v", err)
+	}
+	paid := statusOf(t, m)["accounts"].([]any)[0].(map[string]any)
+	if paid["kind"] != "paid" || paid["health"] == "healthy" || !strings.HasPrefix(paid["health_reason"].(string), "quota reading missing") {
+		t.Fatalf("paid lane status = %v", paid)
+	}
+}
+
+// TestPaidLaneRefusedOnceReadingIsStale is a regression test: a reading that
+// stops being refreshed stops admitting the paid lane after quota-max-age,
+// however low it was, until a fresh reading arrives.
+func TestPaidLaneRefusedOnceReadingIsStale(t *testing.T) {
+	m, clock := newTestModule(t, "{}")
+	freshReading(t, m, clock, 50)
+	if got := mustPick(t, m, pickReq(true, both()...)); got != paidAuthID {
+		t.Fatalf("pick with a fresh 50%% reading = %s, want paid", got)
+	}
+	clock.Advance(defaultQuotaMaxAge + time.Second)
+	if got := mustPick(t, m, pickReq(true, both()...)); got != infiniteAuthID {
+		t.Fatalf("pick with a stale reading = %s, want infinite", got)
+	}
+	clock.Advance(30 * 24 * time.Hour)
+	_, err := m.Pick(context.Background(), pickReq(true, candidate(paidAuthID, "synthetic")))
+	if err == nil || !strings.Contains(err.Error(), "quota reading stale") {
+		t.Fatalf("paid-only pick 30 days after the last reading error = %v", err)
+	}
+	freshReading(t, m, clock, 50)
+	if got := mustPick(t, m, pickReq(true, both()...)); got != paidAuthID {
+		t.Fatalf("pick after a fresh reading = %s, want paid", got)
 	}
 }
 
@@ -414,6 +479,9 @@ func TestUnboundLearnedPaidCredentialFailsClosedEvenWithCreditsLeft(t *testing.T
 	m, _ := newTestModule(t, "{}", twoAccountCompats()...)
 	rekeyed := candidate("openai-compatibility:synthetic:cccccccccccc", "synthetic")
 	known := discoveredLanes(t, m, kindPaid)
+	if err := m.HandleUsage(context.Background(), usage(known[0], http.StatusOK, quotaHeaderValue(50, testStart.Add(time.Hour)))); err != nil {
+		t.Fatal(err)
+	}
 	// A known paid credential still schedules; only the unbound one is refused.
 	got := mustPick(t, m, pickReq(true, rekeyed, candidate(known[0], "synthetic")))
 	if got != known[0] {
@@ -478,9 +546,10 @@ func TestPlaceholderKeyIsUnboundAndNeverPolled(t *testing.T) {
 			t.Fatalf("lane health = %v, want unbound", item.(map[string]any)["health"])
 		}
 	}
-	// Scheduling still works (requests then fail upstream with 401 until the key is pasted).
-	if got := mustPick(t, m, pickReq(true, candidate("openai-compatibility:synthetic:08e39ede6b45", "synthetic"))); got == "" {
-		t.Fatal("no pick with placeholder key")
+	// A placeholder key is never polled, so the paid lane has no weekly
+	// reading and is refused rather than admitted unchecked.
+	if _, err := m.Pick(context.Background(), pickReq(true, candidate("openai-compatibility:synthetic:08e39ede6b45", "synthetic"))); err == nil || !strings.Contains(err.Error(), "quota reading missing") {
+		t.Fatalf("paid pick with placeholder key error = %v, want quota reading missing", err)
 	}
 }
 
@@ -574,7 +643,7 @@ func TestPollerStartsAndStops(t *testing.T) {
 }
 
 func TestStaleReadingProjectsRegeneration(t *testing.T) {
-	m, clock := newTestModule(t, "{}")
+	m, clock := newTestModule(t, `{"quota-max-age":"12h"}`)
 	// 1% remaining, next +2% tick in 10 minutes.
 	_ = m.HandleUsage(context.Background(), usage(paidAuthID, http.StatusOK, quotaHeaderValue(1, testStart.Add(10*time.Minute))))
 	if got := mustPick(t, m, pickReq(true, both()...)); got != infiniteAuthID {

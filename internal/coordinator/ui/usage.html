@@ -367,6 +367,7 @@ ul.notes{margin:0;padding-left:18px;font-size:12px;color:var(--text-tertiary)}
   var REASONS = {
     quota_exhausted: 'Weekly credit exhausted (429/402); waiting for the next refill',
     at_threshold: 'At the paid threshold; new requests go to infinite mode',
+    quota_unknown_or_stale: 'No fresh weekly-credit reading; paid requests refused until one arrives',
     concurrency_cap: 'At its concurrency cap',
     resting: 'Resting after a rate-limit 429',
     unbound_credential: 'Credential not bound to a known account; refused until the next reconfigure',

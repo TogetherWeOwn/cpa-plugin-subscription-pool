@@ -9,6 +9,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Fixed
 
 - Scheduler picks whose candidates mix a managed provider with an unmanaged one fail closed unless the owning module explicitly picks one of its own credentials (`coordinator_mixed_provider_pick`). Z.ai picks explicitly instead of delegating to round-robin when the set is mixed. Cloudflare in `stayWithinIncluded` mode (`cloudflare_no_capacity: foreign_candidate`) and synthetic with a paid credential in the set (`synthetic_foreign_candidate`) refuse such sets themselves instead of declining, and a refused synthetic pick no longer records learned lanes.
+- synthetic admits the paid credential only with a known weekly reading no older than the new `quota-max-age` (default 10m, or twice `quota-refresh-interval`). Without one it falls back to infinite mode or the 429 (`quota reading missing` / `quota reading stale`, page code `quota_unknown_or_stale`). Previously unknown or stale quota admitted the paid lane indefinitely.
+- opencode-go polls dashboard usage in the background every `quota-refresh-interval` (new, default 2m; `"0"` turns it off) instead of only when status is viewed, and status no longer triggers polls. A window is forgotten once its reset time passes, so an exhausted poll reading no longer parks an account past its reset.
+- The release workflow runs the host compatibility matrix in its own job, and `publish` checks the artifacts against a SHA-256 digest that `build` recorded before any host image ran.
 
 ## [0.7.1] - 2026-10-31
 

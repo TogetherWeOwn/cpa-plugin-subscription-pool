@@ -350,7 +350,7 @@ func (c *fakeModuleClock) set(now time.Time) {
 
 func configuredModuleWithCredential(t *testing.T, threshold int, apiKey string, client providermodule.HTTPDoer, clock providermodule.Clock) *Module {
 	t.Helper()
-	module := NewModule()
+	module := &Module{noPoller: true}
 	raw := json.RawMessage(`{"threshold-percent":` + jsonNumber(threshold) + `,"dashboard-api-key":"` + apiKey + `","accounts":[{"name":"go-a","auth-ids":["go-a-1"]},{"name":"go-b","auth-ids":["go-b-1"]}]}`)
 	host := providermodule.HostConfig{Clock: clock, HTTPClient: client}
 	if err := module.Reconfigure(context.Background(), host, raw); err != nil {
@@ -377,7 +377,7 @@ func TestStatusWithoutCredentialReportsUnknownNotGuessed(t *testing.T) {
 	}
 }
 
-func TestStatusPollsAndSurfacesRealResetTimes(t *testing.T) {
+func TestPollSurfacesRealResetTimes(t *testing.T) {
 	now := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
 	fiveHourReset := now.Add(2 * time.Hour)
 	weeklyReset := now.Add(5 * 24 * time.Hour)
@@ -393,6 +393,7 @@ func TestStatusPollsAndSurfacesRealResetTimes(t *testing.T) {
 		)), nil
 	})
 	module := configuredModuleWithCredential(t, 97, dashboardFixtureKey, client, &fakeModuleClock{now: now})
+	module.pollUsageOnce(context.Background())
 	raw, err := module.Status(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -439,6 +440,7 @@ func TestStatusFailsClosedOnUnauthorizedPoll(t *testing.T) {
 		return usageHTTPResponse(http.StatusUnauthorized, `{"type":"error","error":{"type":"AuthError","message":"Missing API key."}}`), nil
 	})
 	module := configuredModuleWithCredential(t, 97, dashboardFixtureKey, client, &fakeModuleClock{now: now})
+	module.pollUsageOnce(context.Background())
 	raw, err := module.Status(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -461,6 +463,7 @@ func TestStatusFailsClosedOnMalformedPollResponse(t *testing.T) {
 		return usageHTTPResponse(http.StatusOK, `{not json`), nil
 	})
 	module := configuredModuleWithCredential(t, 97, dashboardFixtureKey, client, &fakeModuleClock{now: now})
+	module.pollUsageOnce(context.Background())
 	raw, err := module.Status(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -495,6 +498,7 @@ func TestStalePollNeverOverwritesFresherInferredExhaustion(t *testing.T) {
 	// whose observation time is older than the 429 already recorded --
 	// e.g. a delayed/retried fetch racing the live event.
 	clock.set(earlier)
+	module.pollUsageOnce(context.Background())
 	if _, err := module.Status(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -520,6 +524,7 @@ func TestFresherPollUpdatesStaleInferredExhaustion(t *testing.T) {
 	if err := module.HandleUsage(context.Background(), monthlyLimitRecordAt("go-a-1", now.Add(-time.Hour), now.Add(30*time.Minute))); err != nil {
 		t.Fatal(err)
 	}
+	module.pollUsageOnce(context.Background())
 	if _, err := module.Status(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -531,7 +536,7 @@ func TestFresherPollUpdatesStaleInferredExhaustion(t *testing.T) {
 	}
 }
 
-func TestStatusPollsEachAccountWithItsOwnDashboardKey(t *testing.T) {
+func TestPollUsesEachAccountsOwnDashboardKey(t *testing.T) {
 	now := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
 	const (
 		go1Key = "test-only-go-1-key"
@@ -563,7 +568,7 @@ func TestStatusPollsEachAccountWithItsOwnDashboardKey(t *testing.T) {
 		}
 		return usageHTTPResponse(http.StatusOK, body), nil
 	})
-	module := NewModule()
+	module := &Module{noPoller: true}
 	raw := json.RawMessage(`{
 		"threshold-percent": 97,
 		"accounts": [
@@ -576,6 +581,7 @@ func TestStatusPollsEachAccountWithItsOwnDashboardKey(t *testing.T) {
 	if err := module.Reconfigure(context.Background(), host, raw); err != nil {
 		t.Fatalf("Reconfigure() error = %v", err)
 	}
+	module.pollUsageOnce(context.Background())
 	raw2, err := module.Status(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -626,7 +632,7 @@ func TestAccountDashboardKeyFallsBackToModuleLevelKey(t *testing.T) {
 			usageWindowFixture("ok", 1, now.Add(20*24*time.Hour)),
 		)), nil
 	})
-	module := NewModule()
+	module := &Module{noPoller: true}
 	raw := json.RawMessage(`{
 		"threshold-percent": 97,
 		"dashboard-api-key": "` + dashboardFixtureKey + `",
@@ -639,6 +645,7 @@ func TestAccountDashboardKeyFallsBackToModuleLevelKey(t *testing.T) {
 	if err := module.Reconfigure(context.Background(), host, raw); err != nil {
 		t.Fatalf("Reconfigure() error = %v", err)
 	}
+	module.pollUsageOnce(context.Background())
 	if _, err := module.Status(context.Background()); err != nil {
 		t.Fatal(err)
 	}

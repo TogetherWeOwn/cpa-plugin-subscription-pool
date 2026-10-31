@@ -29,6 +29,7 @@ const (
 	maxFailureBody         = 16 << 10
 	maxResetFuture         = 35 * 24 * time.Hour
 	minPollInterval        = 30 * time.Second
+	defaultPollInterval    = 2 * time.Minute
 )
 
 type windowKind string
@@ -43,7 +44,10 @@ type moduleConfig struct {
 	Enabled          bool
 	ThresholdPercent int
 	DashboardAPIKey  string
-	Accounts         []accountConfig
+	// PollInterval is how often each account's dashboard usage is polled in
+	// the background. 0 disables polling; quota then comes only from 429s.
+	PollInterval time.Duration
+	Accounts     []accountConfig
 }
 
 type accountConfig struct {
@@ -57,6 +61,7 @@ type rawModuleConfig struct {
 	Enabled          *bool              `json:"enabled"`
 	ThresholdPercent *int               `json:"threshold-percent"`
 	DashboardAPIKey  string             `json:"dashboard-api-key"`
+	QuotaRefresh     *string            `json:"quota-refresh-interval"`
 	Accounts         []rawAccountConfig `json:"accounts"`
 }
 
@@ -94,9 +99,10 @@ type windowState struct {
 }
 
 type moduleState struct {
-	Threshold int
-	Accounts  map[string]*accountState
-	ByAuthID  map[string]string
+	Threshold    int
+	PollInterval time.Duration
+	Accounts     map[string]*accountState
+	ByAuthID     map[string]string
 }
 
 type Module struct {
@@ -106,6 +112,15 @@ type Module struct {
 	closed     bool
 	clock      providermodule.Clock
 	httpClient providermodule.HTTPDoer
+
+	// The background poller refreshes dashboard usage on PollInterval, so
+	// thresholds hold whether or not anyone views status. Status only reads
+	// cached state.
+	pollerStarted bool
+	pollCancel    context.CancelFunc
+	pollDone      chan struct{}
+	pollWake      chan struct{}
+	noPoller      bool
 }
 
 type realClock struct{}
@@ -163,8 +178,8 @@ func (m *Module) Reconfigure(_ context.Context, host providermodule.HostConfig, 
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.closed {
+		m.mu.Unlock()
 		return fmt.Errorf("opencode_go_closed: module is closed")
 	}
 	carryForwardState(staged, m.state)
@@ -172,7 +187,63 @@ func (m *Module) Reconfigure(_ context.Context, host providermodule.HostConfig, 
 	m.lastErr = ""
 	m.clock = host.Clock
 	m.httpClient = host.HTTPClient
+	startPoller := staged.PollInterval > 0 && stateHasDashboardKey(staged) && !m.noPoller && !m.pollerStarted
+	var ctx context.Context
+	if startPoller {
+		m.pollerStarted = true
+		ctx, m.pollCancel = context.WithCancel(context.Background())
+		m.pollDone = make(chan struct{})
+		m.pollWake = make(chan struct{}, 1)
+	}
+	wake := m.pollWake
+	m.mu.Unlock()
+
+	if startPoller {
+		go m.pollLoop(ctx)
+	} else if wake != nil {
+		select {
+		case wake <- struct{}{}:
+		default:
+		}
+	}
 	return nil
+}
+
+func stateHasDashboardKey(state *moduleState) bool {
+	for _, account := range state.Accounts {
+		if account.DashboardAPIKey != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// pollLoop polls dashboard usage right away and then every PollInterval
+// until Close. A Reconfigure wakes it early so new keys are polled promptly;
+// pollUsageOnce still throttles each account to the interval.
+func (m *Module) pollLoop(ctx context.Context) {
+	m.mu.Lock()
+	done, wake := m.pollDone, m.pollWake
+	m.mu.Unlock()
+	defer close(done)
+	for {
+		m.pollUsageOnce(ctx)
+		m.mu.Lock()
+		interval := defaultPollInterval
+		if m.state != nil && m.state.PollInterval > 0 {
+			interval = m.state.PollInterval
+		}
+		m.mu.Unlock()
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-wake:
+			timer.Stop()
+		case <-timer.C:
+		}
+	}
 }
 
 func (m *Module) OwnedAuthIDs(context.Context) []string {
@@ -312,9 +383,10 @@ func (m *Module) HandleUsage(_ context.Context, record pluginapi.UsageRecord) er
 	return nil
 }
 
-func (m *Module) Status(ctx context.Context) (json.RawMessage, error) {
-	m.pollUsageOnce(ctx)
-
+// Status reports cached state only. It never polls: the usage resource that
+// reaches it is unauthenticated, and polling there would let any caller
+// trigger outbound requests that carry the dashboard key.
+func (m *Module) Status(context.Context) (json.RawMessage, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	type statusWindow struct {
@@ -401,7 +473,12 @@ func (m *Module) Close(context.Context) error {
 	m.mu.Lock()
 	m.closed = true
 	m.state = nil
+	cancel, done, started := m.pollCancel, m.pollDone, m.pollerStarted
 	m.mu.Unlock()
+	if started {
+		cancel()
+		<-done
+	}
 	return nil
 }
 
@@ -427,33 +504,38 @@ func (m *Module) runtimeHTTPClient() httpDoer {
 
 // pollUsageOnce best-effort refreshes every window of every account that has
 // its own dashboard-api-key from that account's own usage endpoint response.
-// Each account is throttled independently by minPollInterval. A poll failure
-// for one account never blocks or corrupts another account's result, and
-// never returns an error to the caller: a failure simply leaves that
-// account's existing window state (429-derived or previously polled) in
-// place rather than failing Status().
+// Each account is throttled independently by the poll interval (at least
+// minPollInterval), and nothing is polled while polling is off. A poll
+// failure for one account never blocks or corrupts another account's result
+// and is never returned: it simply leaves that account's existing window
+// state (429-derived or previously polled) in place.
 func (m *Module) pollUsageOnce(ctx context.Context) {
 	m.mu.Lock()
-	if m.closed || m.state == nil {
+	if m.closed || m.state == nil || m.state.PollInterval <= 0 {
 		m.mu.Unlock()
 		return
 	}
 	now := m.runtimeClock().Now().UTC()
 	client := m.runtimeHTTPClient()
+	interval := m.state.PollInterval
+	if interval < minPollInterval {
+		interval = minPollInterval
+	}
 	type pollTarget struct {
-		name   string
-		apiKey string
+		name    string
+		apiKey  string
+		authIDs []string
 	}
 	var targets []pollTarget
 	for name, account := range m.state.Accounts {
 		if account.DashboardAPIKey == "" {
 			continue
 		}
-		if !account.lastPollAt.IsZero() && now.Sub(account.lastPollAt) < minPollInterval {
+		if !account.lastPollAt.IsZero() && now.Sub(account.lastPollAt) < interval {
 			continue
 		}
 		account.lastPollAt = now
-		targets = append(targets, pollTarget{name: name, apiKey: account.DashboardAPIKey})
+		targets = append(targets, pollTarget{name: name, apiKey: account.DashboardAPIKey, authIDs: append([]string(nil), account.AuthIDs...)})
 	}
 	m.mu.Unlock()
 	if len(targets) == 0 {
@@ -461,7 +543,7 @@ func (m *Module) pollUsageOnce(ctx context.Context) {
 	}
 
 	type pollResult struct {
-		name     string
+		target   pollTarget
 		snapshot usageSnapshot
 		err      error
 	}
@@ -472,7 +554,7 @@ func (m *Module) pollUsageOnce(ctx context.Context) {
 		go func(target pollTarget) {
 			defer wg.Done()
 			snapshot, err := fetchUsage(ctx, client, usageEndpoint, target.apiKey, now)
-			results <- pollResult{name: target.name, snapshot: snapshot, err: err}
+			results <- pollResult{target: target, snapshot: snapshot, err: err}
 		}(target)
 	}
 	wg.Wait()
@@ -487,8 +569,10 @@ func (m *Module) pollUsageOnce(ctx context.Context) {
 		if result.err != nil {
 			continue
 		}
-		account := m.state.Accounts[result.name]
-		if account == nil {
+		// A Reconfigure during the fetch may have rebound this account name
+		// to other credentials; the old key's usage says nothing about them.
+		account := m.state.Accounts[result.target.name]
+		if account == nil || account.DashboardAPIKey != result.target.apiKey || !sameIDs(account.AuthIDs, result.target.authIDs) {
 			continue
 		}
 		for kind, window := range snapshotWindows(result.snapshot) {
@@ -516,7 +600,7 @@ func snapshotWindows(snapshot usageSnapshot) map[windowKind]usageWindow {
 }
 
 func parseConfig(raw json.RawMessage) (moduleConfig, error) {
-	cfg := moduleConfig{Enabled: true, ThresholdPercent: defaultThreshold}
+	cfg := moduleConfig{Enabled: true, ThresholdPercent: defaultThreshold, PollInterval: defaultPollInterval}
 	if len(strings.TrimSpace(string(raw))) == 0 || strings.TrimSpace(string(raw)) == "null" {
 		return cfg, nil
 	}
@@ -534,6 +618,18 @@ func parseConfig(raw json.RawMessage) (moduleConfig, error) {
 	}
 	if cfg.ThresholdPercent < 1 || cfg.ThresholdPercent > 100 {
 		return moduleConfig{}, fmt.Errorf("opencode_go_invalid_config: threshold-percent must be between 1 and 100")
+	}
+	if input.QuotaRefresh != nil {
+		value := strings.TrimSpace(*input.QuotaRefresh)
+		if value == "0" {
+			cfg.PollInterval = 0
+		} else {
+			parsed, err := time.ParseDuration(value)
+			if err != nil || parsed < minPollInterval {
+				return moduleConfig{}, fmt.Errorf("opencode_go_invalid_config: quota-refresh-interval must be 0 (off) or a Go duration of at least %s", minPollInterval)
+			}
+			cfg.PollInterval = parsed
+		}
 	}
 	// An empty dashboard-api-key is valid: it means no credential is bound
 	// and the module must fail closed to "unknown" rather than error.
@@ -564,7 +660,7 @@ func parseConfig(raw json.RawMessage) (moduleConfig, error) {
 }
 
 func buildState(cfg moduleConfig) (*moduleState, error) {
-	state := &moduleState{Threshold: cfg.ThresholdPercent, Accounts: make(map[string]*accountState), ByAuthID: make(map[string]string)}
+	state := &moduleState{Threshold: cfg.ThresholdPercent, PollInterval: cfg.PollInterval, Accounts: make(map[string]*accountState), ByAuthID: make(map[string]string)}
 	if !cfg.Enabled {
 		return state, nil
 	}
@@ -679,10 +775,15 @@ func requestTime(req pluginapi.SchedulerPickRequest) time.Time {
 	return time.Now().UTC()
 }
 
+// refreshWindows forgets windows whose cooldown or reset time has passed: a
+// reading from before a window's reset says nothing about usage after it, so
+// an exhausted or over-threshold reading must not park the account past it.
 func refreshWindows(account *accountState, now time.Time) {
 	for _, kind := range []windowKind{windowFiveHour, windowWeekly, windowMonthly} {
 		window := account.Windows[kind]
-		if !window.CooldownAt.IsZero() && !window.CooldownAt.After(now) {
+		cooledDown := !window.CooldownAt.IsZero() && !window.CooldownAt.After(now)
+		reset := !window.ResetAt.IsZero() && !window.ResetAt.After(now)
+		if cooledDown || reset {
 			window = windowState{}
 			account.Windows[kind] = window
 		}

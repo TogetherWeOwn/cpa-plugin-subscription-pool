@@ -77,6 +77,7 @@ Behavior:
 
 - `synthetic/deepseek-v4.1-flash` uses the paid credential while the plan is under the threshold and switches to infinite mode when it is at the threshold, exhausted (429/402), or at `max-concurrent`. Without the plugin, CLIProxyAPI's own priority order gives the same fallback, but only after the paid credential has failed and cooled down.
 - Paid-only models (no infinite alias) get a retryable HTTP 429 `synthetic_no_capacity` at the threshold rather than a request that could be billed as extra usage.
+- The paid credential is admitted only with a known, fresh weekly reading. Before the first poll or `x-synthetic-quotas` header arrives, and once the last reading is older than `quota-max-age` (default 10m, or twice `quota-refresh-interval` when that is longer), requests go to infinite mode or get the same 429. With `quota-refresh-interval: "0"`, readings come only from response headers, so the paid credential stays closed until infinite-mode traffic brings one.
 - Weekly usage comes from `GET /v2/quotas` and the `x-synthetic-quotas` response header and is projected through the documented regeneration (2% every 202 minutes). Placeholder keys (for example `<API KEY PLACEHOLDER>`) are never sent anywhere; the lanes show `health: unbound` until a real key is configured.
 - `GET /v0/management/plugins/subscription-pool/status` -> `providers.synthetic.accounts[].stats` reports measured output tokens per second and time to first token per lane, so infinite-mode speed can be compared with the paid lane.
 
@@ -343,7 +344,7 @@ A release tag is created only after all implementation slices are merged and the
 4. an exact-SHA code review; and
 5. a separate exact-SHA security review for credential handling and management operations.
 
-The release tag must point to that reviewed commit after it is merged to `main`. The tag workflow validates strict semantic-version syntax and proves the event commit is reachable from `origin/main` before any repository build or packaging command receives the version. Tags trigger the release workflow. Do not publish locally built artifacts or move an existing tag.
+The release tag must point to that reviewed commit after it is merged to `main`. The tag workflow validates strict semantic-version syntax and proves the event commit is reachable from `origin/main` before any repository build or packaging command receives the version. Tags trigger the release workflow. The release workflow runs the host matrix in a separate `host-matrix` job (third-party host binaries run as root there) and `publish` only uploads artifacts whose SHA-256 digest matches the one `build` recorded before that job ran. Do not publish locally built artifacts or move an existing tag.
 
 ## Security and scope
 
