@@ -93,6 +93,7 @@ type Module struct {
 var _ providermodule.Module = (*Module)(nil)
 var _ providermodule.UsageAttributor = (*Module)(nil)
 var _ providermodule.UsageRecognizer = (*Module)(nil)
+var _ providermodule.ConfigValidator = (*Module)(nil)
 
 func NewModule() *Module             { return &Module{now: func() time.Time { return time.Now().UTC() }} }
 func (m *Module) ID() string         { return providerID }
@@ -119,49 +120,9 @@ func (m *Module) Reconfigure(_ context.Context, host providermodule.HostConfig, 
 	if err != nil {
 		return err
 	}
-	providers := map[string]bool{}
-	for _, name := range cfg.Providers {
-		providers[name] = true
-	}
-	lanes := map[string]*lane{}
-	accounts := map[string]*account{}
-	counters := map[string]int{}
-	for _, compat := range host.OpenAICompatibility {
-		name := strings.ToLower(strings.TrimSpace(compat.Name))
-		if compat.Disabled || !providers[name] {
-			continue
-		}
-		id, err := accountID(compat.BaseURL)
-		if err != nil {
-			return err
-		}
-		if len(compat.APIKeyEntries) == 0 {
-			return fmt.Errorf("cloudflare_invalid_config: Workers AI requires an API key entry")
-		}
-		reservations := configuredReservations(name, compat.Models)
-		for _, entry := range compat.APIKeyEntries {
-			key := strings.TrimSpace(entry.APIKey)
-			bound := key != "" && !strings.ContainsAny(key, "<>$ {}") && !strings.Contains(strings.ToLower(key), "placeholder")
-			kind := "openai-compatibility:" + name
-			h := sha256.Sum256([]byte(kind + "\x00" + key + "\x00" + strings.TrimSpace(compat.BaseURL) + "\x00" + strings.TrimSpace(entry.ProxyURL))) // codeql[go/weak-sensitive-data-hashing] Upstream non-security ID contract.
-			auth := kind + ":" + hex.EncodeToString(h[:])[:12]
-			n := counters[auth]
-			counters[auth]++
-			if n > 0 {
-				auth += fmt.Sprintf("-%d", n)
-			}
-			lanes[auth] = &lane{account: id, provider: name, bound: bound, reservations: reservations}
-			if accounts[id] == nil || accounts[id].token == "" {
-				token := ""
-				if bound {
-					token = key
-				}
-				accounts[id] = &account{token: token}
-			}
-		}
-	}
-	if !cfg.Enabled && len(lanes) > 0 {
-		return fmt.Errorf("cloudflare_invalid_config: disable the host provider before disabling its guard; use stayWithinIncluded=false for PAYG")
+	providers, lanes, accounts, err := discover(cfg, host)
+	if err != nil {
+		return err
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -276,6 +237,74 @@ func (m *Module) Reconfigure(_ context.Context, host providermodule.HostConfig, 
 		go m.pollLoop(ctx)
 	}
 	return nil
+}
+
+// ValidateConfig implements providermodule.ConfigValidator: it runs the
+// parse and lane discovery Reconfigure would, without opening the budget
+// store or changing live lanes.
+func (m *Module) ValidateConfig(host providermodule.HostConfig, raw json.RawMessage) error {
+	cfg, err := parseConfig(raw)
+	if err != nil {
+		return err
+	}
+	_, lanes, _, err := discover(cfg, host)
+	if err != nil {
+		return err
+	}
+	if cfg.Enabled && len(lanes) > 0 && (host.AuthDir == "" || !filepath.IsAbs(host.AuthDir)) {
+		return fmt.Errorf("cloudflare_invalid_config: absolute auth-dir is required")
+	}
+	return nil
+}
+
+// discover builds the lanes and accounts cfg selects from the host's
+// openai-compatibility entries.
+func discover(cfg moduleConfig, host providermodule.HostConfig) (map[string]bool, map[string]*lane, map[string]*account, error) {
+	providers := map[string]bool{}
+	for _, name := range cfg.Providers {
+		providers[name] = true
+	}
+	lanes := map[string]*lane{}
+	accounts := map[string]*account{}
+	counters := map[string]int{}
+	for _, compat := range host.OpenAICompatibility {
+		name := strings.ToLower(strings.TrimSpace(compat.Name))
+		if compat.Disabled || !providers[name] {
+			continue
+		}
+		id, err := accountID(compat.BaseURL)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		if len(compat.APIKeyEntries) == 0 {
+			return nil, nil, nil, fmt.Errorf("cloudflare_invalid_config: Workers AI requires an API key entry")
+		}
+		reservations := configuredReservations(name, compat.Models)
+		for _, entry := range compat.APIKeyEntries {
+			key := strings.TrimSpace(entry.APIKey)
+			bound := key != "" && !strings.ContainsAny(key, "<>$ {}") && !strings.Contains(strings.ToLower(key), "placeholder")
+			kind := "openai-compatibility:" + name
+			h := sha256.Sum256([]byte(kind + "\x00" + key + "\x00" + strings.TrimSpace(compat.BaseURL) + "\x00" + strings.TrimSpace(entry.ProxyURL))) // codeql[go/weak-sensitive-data-hashing] Upstream non-security ID contract.
+			auth := kind + ":" + hex.EncodeToString(h[:])[:12]
+			n := counters[auth]
+			counters[auth]++
+			if n > 0 {
+				auth += fmt.Sprintf("-%d", n)
+			}
+			lanes[auth] = &lane{account: id, provider: name, bound: bound, reservations: reservations}
+			if accounts[id] == nil || accounts[id].token == "" {
+				token := ""
+				if bound {
+					token = key
+				}
+				accounts[id] = &account{token: token}
+			}
+		}
+	}
+	if !cfg.Enabled && len(lanes) > 0 {
+		return nil, nil, nil, fmt.Errorf("cloudflare_invalid_config: disable the host provider before disabling its guard; use stayWithinIncluded=false for PAYG")
+	}
+	return providers, lanes, accounts, nil
 }
 
 func validState(s diskState) bool {

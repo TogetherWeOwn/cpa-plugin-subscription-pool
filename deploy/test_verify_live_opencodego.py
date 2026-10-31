@@ -9,6 +9,8 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "deploy" / "verify-live-opencodego.sh"
+# The host's /v0/management/plugins answer while the pool plugin is live.
+REGISTERED_PLUGIN_LISTING = '{"plugins_enabled": true, "plugins": [{"id": "subscription-pool", "registered": true, "effective_enabled": true}]}'
 
 
 class VerifyLiveOpencodegoTest(unittest.TestCase):
@@ -31,6 +33,7 @@ class VerifyLiveOpencodegoTest(unittest.TestCase):
         collector_fails=False,
         allow_unbound=False,
         credential_bound=True,
+        plugins_json=None,
     ):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -54,6 +57,8 @@ class VerifyLiveOpencodegoTest(unittest.TestCase):
                 args=sys.argv[1:]
                 if "%{{http_code}}" in args:
                     print("401", end="")
+                elif args and args[-1].endswith("/v0/management/plugins"):
+                    print({plugins_json if plugins_json is not None else REGISTERED_PLUGIN_LISTING!r})
                 else:
                     status_json={status_json!r}
                     if status_json is not None:
@@ -177,14 +182,15 @@ class VerifyLiveOpencodegoTest(unittest.TestCase):
         completed, curl_argv, _ = self.run_verify()
         self.assertEqual(completed.returncode, 0, completed.stderr)
         invocations = [part for part in curl_argv.split("---\n") if "management.curl" in part]
-        self.assertEqual(len(invocations), 1)
-        args = invocations[0].splitlines()
-        self.assertEqual(args[0], "-q")
-        self.assertIn("--max-time\n5", invocations[0])
-        self.assertIn("--max-filesize\n1048576", invocations[0])
-        self.assertIn("--max-redirs\n0", invocations[0])
-        self.assertIn("--noproxy\n*", invocations[0])
-        self.assertIn("--proxy\n", invocations[0])
+        self.assertEqual(len(invocations), 2)
+        for invocation in invocations:
+            args = invocation.splitlines()
+            self.assertEqual(args[0], "-q")
+            self.assertIn("--max-time\n5", invocation)
+            self.assertIn("--max-filesize\n1048576", invocation)
+            self.assertIn("--max-redirs\n0", invocation)
+            self.assertIn("--noproxy\n*", invocation)
+            self.assertIn("--proxy\n", invocation)
 
     def test_rejects_unsafe_journal_timeout_before_curl(self):
         for value in ("0", "-1", "--help", "1 day", "nan", "inf"):
@@ -348,6 +354,23 @@ class VerifyLiveOpencodegoTest(unittest.TestCase):
         completed, _, _ = self.run_verify(service_log="x" * 1_048_577)
         self.assertNotEqual(completed.returncode, 0)
 
+
+    def test_plugin_missing_from_host_snapshot_fails_closed(self):
+        for listing in (
+            '{"plugins_enabled": true, "plugins": []}',
+            '{"plugins_enabled": true, "plugins": [{"id": "subscription-pool", "registered": false, "effective_enabled": false}]}',
+            '{"plugins_enabled": true, "plugins": [{"id": "subscription-pool", "registered": true, "effective_enabled": false}]}',
+            "not json",
+        ):
+            with self.subTest(listing=listing):
+                completed, _, _ = self.run_verify(plugins_json=listing)
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn("host plugin snapshot", completed.stderr)
+
+    def test_host_plugin_snapshot_is_checked(self):
+        completed, curl_argv, _ = self.run_verify()
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("/v0/management/plugins\n", curl_argv)
 
 if __name__ == "__main__":
     unittest.main()

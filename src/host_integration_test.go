@@ -404,41 +404,44 @@ func TestHostPropagatesAllImpairedSchedulerError(t *testing.T) {
 	}
 }
 
-func TestInvalidReconfigureWithdrawsHostRegistration(t *testing.T) {
+// hostWithPlugin loads the compiled plugin into a real SDK host configured
+// from cpaConfigPath, and returns a function that re-applies the same host
+// config (as the host does on every config reload).
+func hostWithPlugin(t *testing.T, root, cpaConfigPath, authDir string) (*pluginhost.Host, func()) {
+	t.Helper()
 	binary, err := buildTestPlugin(t)
 	if err != nil {
 		t.Fatalf("build plugin: %v", err)
 	}
-
-	root := t.TempDir()
 	pluginDir := filepath.Join(root, "plugins", "linux", "amd64")
 	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	versioned := filepath.Join(pluginDir, pluginID+"-v0.0.0-test.so")
-	if err := copyFile(versioned, binary); err != nil {
+	if err := copyFile(filepath.Join(pluginDir, pluginID+"-v0.0.0-test.so"), binary); err != nil {
 		t.Fatal(err)
 	}
-
-	authDir := filepath.Join(root, "auth")
-	cpaConfigPath := filepath.Join(root, "config.yaml")
-	writeSrcCPAConfigFixture(t, cpaConfigPath, authDir, fixtureKey)
 	enabled := true
 	configNode := pluginConfigNode(t, cpaConfigPath)
 	host := pluginhost.New()
-	host.ApplyConfig(context.Background(), pluginhost.RuntimeConfig{
-		Enabled: true,
-		Dir:     filepath.Join(root, "plugins"),
-		AuthDir: authDir,
-		Configs: map[string]pluginhost.PluginInstanceConfig{
-			pluginID: {Enabled: &enabled, Priority: 1000, Raw: configNode},
-		},
-	})
-	defer host.ShutdownAll()
-	if !host.HasScheduler() {
-		t.Fatal("initial exclusive configuration did not register scheduler")
+	apply := func() {
+		host.ApplyConfig(context.Background(), pluginhost.RuntimeConfig{
+			Enabled: true,
+			Dir:     filepath.Join(root, "plugins"),
+			AuthDir: authDir,
+			Configs: map[string]pluginhost.PluginInstanceConfig{
+				pluginID: {Enabled: &enabled, Priority: 1000, Raw: configNode},
+			},
+		})
 	}
+	apply()
+	t.Cleanup(host.ShutdownAll)
+	return host, apply
+}
 
+// addUnlistedPlugin enables a second plugin the pool config does not list in
+// coexisting-plugins, which the coordinator must reject.
+func addUnlistedPlugin(t *testing.T, cpaConfigPath string) {
+	t.Helper()
 	raw, err := os.ReadFile(cpaConfigPath)
 	if err != nil {
 		t.Fatal(err)
@@ -447,21 +450,67 @@ func TestInvalidReconfigureWithdrawsHostRegistration(t *testing.T) {
 	if err = os.WriteFile(cpaConfigPath, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	host.ApplyConfig(context.Background(), pluginhost.RuntimeConfig{
-		Enabled: true,
-		Dir:     filepath.Join(root, "plugins"),
-		AuthDir: authDir,
-		Configs: map[string]pluginhost.PluginInstanceConfig{
-			pluginID: {Enabled: &enabled, Priority: 1000, Raw: configNode},
-		},
-	})
+}
 
-	if host.HasScheduler() {
-		t.Fatal("invalid live reconfigure retained scheduler capability")
+// requireRejectedSchedulerFailsClosed asserts the plugin is still the host's
+// registered scheduler and hard-fails candidate rather than letting CPA's
+// native scheduler route it, while unrelated candidates stay unhandled.
+func requireRejectedSchedulerFailsClosed(t *testing.T, host *pluginhost.Host, candidate pluginapi.SchedulerAuthCandidate) {
+	t.Helper()
+	if !host.HasScheduler() {
+		t.Fatal("rejected config withdrew the scheduler; CPA would route guarded credentials natively")
 	}
-	if plugins := host.RegisteredPlugins(); len(plugins) != 0 {
-		t.Fatalf("registered plugins = %#v, want none after rejected reconfigure", plugins)
+	registered := false
+	for _, plugin := range host.RegisteredPlugins() {
+		registered = registered || plugin.ID == pluginID
 	}
+	if !registered {
+		t.Fatalf("registered plugins = %#v, want %s to stay registered", host.RegisteredPlugins(), pluginID)
+	}
+	_, handled, err := host.PickAuth(context.Background(), pluginapi.SchedulerPickRequest{Candidates: []pluginapi.SchedulerAuthCandidate{candidate}})
+	if err == nil || !strings.Contains(err.Error(), "plugin configuration was rejected") {
+		t.Fatalf("pick of a guarded candidate = handled %v, err %v; want the config-rejected scheduler error", handled, err)
+	}
+	resp, handled, err := host.PickAuth(context.Background(), pluginapi.SchedulerPickRequest{Candidates: []pluginapi.SchedulerAuthCandidate{{ID: "claude:unrelated", Provider: "claude"}}})
+	if err != nil || handled || resp.Handled {
+		t.Fatalf("pick of an unrelated candidate = %#v, handled %v, err %v; want unhandled", resp, handled, err)
+	}
+}
+
+func TestRejectedReconfigureKeepsSchedulerFailClosed(t *testing.T) {
+	root := t.TempDir()
+	authDir := filepath.Join(root, "auth")
+	cpaConfigPath := filepath.Join(root, "config.yaml")
+	writeSrcCPAConfigFixture(t, cpaConfigPath, authDir, fixtureKey)
+	authIDs := ownedZaiAuthIDs(t, cpaConfigPath)
+	host, apply := hostWithPlugin(t, root, cpaConfigPath, authDir)
+	if !host.HasScheduler() {
+		t.Fatal("initial exclusive configuration did not register scheduler")
+	}
+
+	addUnlistedPlugin(t, cpaConfigPath)
+	apply()
+	requireRejectedSchedulerFailsClosed(t, host, pluginapi.SchedulerAuthCandidate{ID: authIDs[0]})
+
+	writeSrcCPAConfigFixture(t, cpaConfigPath, authDir, fixtureKey)
+	apply()
+	resp, handled, err := host.PickAuth(context.Background(), pluginapi.SchedulerPickRequest{Candidates: []pluginapi.SchedulerAuthCandidate{{ID: authIDs[0]}}})
+	if err != nil {
+		t.Fatalf("pick after a valid reconfigure = %#v, handled %v, err %v; want the rejection cleared", resp, handled, err)
+	}
+}
+
+func TestRejectedRegisterKeepsSchedulerFailClosed(t *testing.T) {
+	root := t.TempDir()
+	authDir := filepath.Join(root, "auth")
+	cpaConfigPath := filepath.Join(root, "config.yaml")
+	writeSrcCPAConfigFixture(t, cpaConfigPath, authDir, fixtureKey)
+	addUnlistedPlugin(t, cpaConfigPath)
+	host, _ := hostWithPlugin(t, root, cpaConfigPath, authDir)
+
+	// No config was ever accepted, so the registry is empty; the zai module
+	// still recognizes its own family by provider attributes.
+	requireRejectedSchedulerFailsClosed(t, host, pluginapi.SchedulerAuthCandidate{ID: "zai-auth", Provider: "zai-coding-plan", Attributes: map[string]string{"compat_name": "zai-coding-plan"}})
 }
 
 // pluginConfigNode builds the plugin's own config_yaml node: only

@@ -1,0 +1,181 @@
+package coordinator
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+
+	"github.com/TogetherWeOwn/cpa-plugin-subscription-pool/internal/providermodule"
+)
+
+// stagingFakeModule adds the optional ConfigValidator to fakeModule and
+// records every config Reconfigure applies.
+type stagingFakeModule struct {
+	fakeModule
+	validate    func(json.RawMessage) error
+	reconfigure func(json.RawMessage) error
+	applied     []string
+}
+
+func (m *stagingFakeModule) ValidateConfig(_ providermodule.HostConfig, raw json.RawMessage) error {
+	if m.validate == nil {
+		return nil
+	}
+	return m.validate(raw)
+}
+
+func (m *stagingFakeModule) Reconfigure(_ context.Context, _ providermodule.HostConfig, raw json.RawMessage) error {
+	if m.reconfigure != nil {
+		if err := m.reconfigure(raw); err != nil {
+			return err
+		}
+	}
+	m.applied = append(m.applied, string(raw))
+	return nil
+}
+
+func rejectVersion(version string) func(json.RawMessage) error {
+	return func(raw json.RawMessage) error {
+		if strings.Contains(string(raw), `"v":`+version) {
+			return fmt.Errorf("version %s rejected", version)
+		}
+		return nil
+	}
+}
+
+// poolConfig returns a coordinator config giving every listed module the
+// provider config {"v": version}.
+func poolConfig(t *testing.T, version int, ids ...string) []byte {
+	t.Helper()
+	root := t.TempDir()
+	configPath := filepath.Join(root, "config.yaml")
+	writeCoordinatorCPAConfigFixture(t, configPath, filepath.Join(root, "auth"), zaiIntegrationFixtureKey)
+	raw := "cpa-config-path: " + configPath + "\nproviders:\n"
+	for _, id := range ids {
+		raw += fmt.Sprintf("  %s:\n    v: %d\n", id, version)
+	}
+	return []byte(raw)
+}
+
+func TestReconfigureStagesEveryModuleBeforeCommitting(t *testing.T) {
+	alpha := &stagingFakeModule{fakeModule: fakeModule{id: "alpha"}}
+	beta := &stagingFakeModule{fakeModule: fakeModule{id: "beta"}, validate: rejectVersion("2")}
+	c := New(alpha, beta)
+	if err := c.Reconfigure(poolConfig(t, 1, "alpha", "beta")); err != nil {
+		t.Fatalf("Reconfigure(v1) error = %v", err)
+	}
+	if err := c.Reconfigure(poolConfig(t, 2, "alpha", "beta")); err == nil {
+		t.Fatal("Reconfigure(v2) = nil error, want beta's validation error")
+	}
+	if want := []string{`{"v":1}`}; fmt.Sprint(alpha.applied) != fmt.Sprint(want) {
+		t.Fatalf("alpha applied %v, want %v: a config beta rejects must never reach alpha", alpha.applied, want)
+	}
+}
+
+func TestReconfigureRollsBackCommittedModulesWhenALaterCommitFails(t *testing.T) {
+	alpha := &stagingFakeModule{fakeModule: fakeModule{id: "alpha"}}
+	beta := &stagingFakeModule{fakeModule: fakeModule{id: "beta"}, reconfigure: rejectVersion("2")}
+	c := New(alpha, beta)
+	if err := c.Reconfigure(poolConfig(t, 1, "alpha", "beta")); err != nil {
+		t.Fatalf("Reconfigure(v1) error = %v", err)
+	}
+	if err := c.Reconfigure(poolConfig(t, 2, "alpha", "beta")); err == nil {
+		t.Fatal("Reconfigure(v2) = nil error, want beta's commit error")
+	}
+	if want := []string{`{"v":1}`, `{"v":2}`, `{"v":1}`}; fmt.Sprint(alpha.applied) != fmt.Sprint(want) {
+		t.Fatalf("alpha applied %v, want %v: alpha must be restored to v1", alpha.applied, want)
+	}
+}
+
+func TestReconfigureRollsBackEveryModuleOnRegistryConflict(t *testing.T) {
+	alpha := &stagingFakeModule{fakeModule: fakeModule{id: "alpha", ownedIDs: []string{"shared"}}}
+	beta := &stagingFakeModule{fakeModule: fakeModule{id: "beta"}}
+	c := New(alpha, beta)
+	if err := c.Reconfigure(poolConfig(t, 1, "alpha", "beta")); err != nil {
+		t.Fatalf("Reconfigure(v1) error = %v", err)
+	}
+	beta.ownedIDs = []string{"shared"}
+	if err := c.Reconfigure(poolConfig(t, 2, "alpha", "beta")); err == nil {
+		t.Fatal("Reconfigure(v2) = nil error, want ownership conflict")
+	}
+	for _, module := range []*stagingFakeModule{alpha, beta} {
+		if got := module.applied[len(module.applied)-1]; got != `{"v":1}` {
+			t.Fatalf("%s last applied %s, want rollback to v1", module.id, got)
+		}
+	}
+	if got := c.registry.providerFor("shared"); got != "alpha" {
+		t.Fatalf("registry owner of shared = %q, want the previous registry (alpha) live", got)
+	}
+}
+
+func TestRejectedConfigFailsClosedForGuardedCandidates(t *testing.T) {
+	picked := false
+	alpha := &stagingFakeModule{fakeModule: fakeModule{id: "alpha", recognize: recognizeID("alpha-"), ownedIDs: []string{"owned-by-alpha"}, pick: func(pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
+		picked = true
+		return pluginapi.SchedulerPickResponse{Handled: true, DelegateBuiltin: "round-robin"}, nil
+	}}, validate: rejectVersion("2")}
+	c := New(alpha)
+	if err := c.Reconfigure(poolConfig(t, 1, "alpha")); err != nil {
+		t.Fatalf("Reconfigure(v1) error = %v", err)
+	}
+	if err := c.Reconfigure(poolConfig(t, 2, "alpha")); err == nil {
+		t.Fatal("Reconfigure(v2) = nil error, want rejection")
+	}
+
+	for _, candidate := range []pluginapi.SchedulerAuthCandidate{{ID: "alpha-1"}, {ID: "owned-by-alpha"}} {
+		_, err := c.Pick(pluginapi.SchedulerPickRequest{Candidates: []pluginapi.SchedulerAuthCandidate{{ID: "other"}, candidate}})
+		var rejected *configRejectedError
+		if !errors.As(err, &rejected) || rejected.Coded().Code != "coordinator_config_rejected" {
+			t.Fatalf("Pick(%s) error = %v, want coordinator_config_rejected", candidate.ID, err)
+		}
+	}
+	if picked {
+		t.Fatal("a module's Pick ran while the config was rejected")
+	}
+	if resp, err := c.Pick(pluginapi.SchedulerPickRequest{Candidates: []pluginapi.SchedulerAuthCandidate{{ID: "other"}}}); err != nil || resp.Handled {
+		t.Fatalf("Pick(unrelated) = %#v, %v; want Handled:false", resp, err)
+	}
+	status := c.managementStatus()
+	if status.Status != "reconfigure_rejected" || !strings.Contains(status.ValidationError, "version 2 rejected") {
+		t.Fatalf("status = %q / %q, want the rejection reported", status.Status, status.ValidationError)
+	}
+
+	if err := c.Reconfigure(poolConfig(t, 3, "alpha")); err != nil {
+		t.Fatalf("Reconfigure(v3) error = %v", err)
+	}
+	if resp, err := c.Pick(pluginapi.SchedulerPickRequest{Candidates: []pluginapi.SchedulerAuthCandidate{{ID: "alpha-1"}}}); err != nil || !resp.Handled || !picked {
+		t.Fatalf("Pick after a valid reconfigure = %#v, %v; want the module's own pick", resp, err)
+	}
+}
+
+func TestRejectedFirstConfigFailsClosedForRecognizedCandidates(t *testing.T) {
+	alpha := &stagingFakeModule{fakeModule: fakeModule{id: "alpha", recognize: recognizeID("alpha-")}}
+	c := New(alpha)
+	if err := c.Reconfigure([]byte("cpa-config-path: " + filepath.Join(t.TempDir(), "missing.yaml") + "\n")); err == nil {
+		t.Fatal("Reconfigure(unreadable CPA config) = nil error, want rejection")
+	}
+	if _, err := c.Pick(pluginapi.SchedulerPickRequest{Candidates: []pluginapi.SchedulerAuthCandidate{{ID: "alpha-1"}}}); err == nil {
+		t.Fatal("Pick(recognized) after a rejected first config = nil error, want fail closed")
+	}
+	if len(alpha.applied) != 0 {
+		t.Fatalf("alpha applied %v, want nothing", alpha.applied)
+	}
+}
+
+func TestRecordedLifecycleErrorFailsClosed(t *testing.T) {
+	alpha := &stagingFakeModule{fakeModule: fakeModule{id: "alpha", recognize: recognizeID("alpha-")}}
+	c := New(alpha)
+	if err := c.Reconfigure(poolConfig(t, 1, "alpha")); err != nil {
+		t.Fatalf("Reconfigure(v1) error = %v", err)
+	}
+	_ = c.RecordError(fmt.Errorf("lifecycle request body is invalid"))
+	if _, err := c.Pick(pluginapi.SchedulerPickRequest{Candidates: []pluginapi.SchedulerAuthCandidate{{ID: "alpha-1"}}}); err == nil {
+		t.Fatal("Pick after an undecodable lifecycle request = nil error, want fail closed")
+	}
+}

@@ -46,6 +46,13 @@ type Coordinator struct {
 
 	registry registry
 
+	// reconfigureMu serializes reconfigures, so staging, committing and
+	// rolling back modules never interleave. applied records the config
+	// each module last accepted in a fully successful reconfigure, so a
+	// commit that fails part-way can restore the modules it already changed.
+	reconfigureMu sync.Mutex
+	applied       map[string]appliedConfig
+
 	reconfigures sync.WaitGroup
 	// usage counts handleUsage calls in progress; Shutdown waits for them
 	// before its final ledger flush, so no accepted record misses it.
@@ -74,6 +81,35 @@ func New(modules ...providermodule.Module) *Coordinator {
 		c.modules = append(c.modules, moduleEntry{id: id, module: module})
 	}
 	return c
+}
+
+// appliedConfig is one module's share of an accepted reconfigure.
+type appliedConfig struct {
+	host           providermodule.HostConfig
+	providerConfig json.RawMessage
+}
+
+// stagedModule is one module's share of the reconfigure being applied.
+type stagedModule struct {
+	entry          moduleEntry
+	providerConfig json.RawMessage
+}
+
+// configRejectedError is the hard scheduler error pick returns while the
+// most recent configuration is rejected. It carries a stable wire code so
+// the ABI glue reports it as such instead of a generic plugin error.
+type configRejectedError struct{ reason string }
+
+func (e *configRejectedError) Error() string {
+	return "coordinator_config_rejected: " + e.message()
+}
+
+func (e *configRejectedError) message() string {
+	return "plugin configuration was rejected; managed credentials stay blocked until a valid configuration is applied: " + e.reason
+}
+
+func (e *configRejectedError) Coded() providermodule.WireError {
+	return providermodule.WireError{Code: "coordinator_config_rejected", Message: e.message()}
 }
 
 func (c *Coordinator) runtimeNow() time.Time {
@@ -121,6 +157,9 @@ func (c *Coordinator) reconfigure(rawConfig []byte) error {
 	c.mu.Unlock()
 	defer c.reconfigures.Done()
 
+	c.reconfigureMu.Lock()
+	defer c.reconfigureMu.Unlock()
+
 	host := providermodule.HostConfig{
 		CPAConfigPath:       configPath,
 		AuthDir:             pluginAuthDir,
@@ -128,16 +167,32 @@ func (c *Coordinator) reconfigure(rawConfig []byte) error {
 		OpenAICompatibility: cpa.OpenAICompatibility,
 	}
 
+	// Stage: resolve and validate every module's config, and reserve its
+	// storage, before any module commits. A config one module rejects
+	// therefore leaves every module on its previous config.
+	staged := make([]stagedModule, 0, len(c.modules))
 	for _, entry := range c.modules {
 		providerConfig, err := providerConfigRaw(cfg, entry.id)
 		if err != nil {
 			return c.recordError(err)
 		}
-		if err := entry.module.Reconfigure(context.Background(), host, providerConfig); err != nil {
-			return c.recordError(fmt.Errorf("provider %s: %w", entry.id, err))
+		if validator, ok := entry.module.(providermodule.ConfigValidator); ok {
+			if err := validator.ValidateConfig(host, providerConfig); err != nil {
+				return c.recordError(fmt.Errorf("provider %s: %w", entry.id, err))
+			}
 		}
 		if err := securestore.EnsureEmptyProviderDir(providerStubDir(pluginAuthDir, entry.id)); err != nil {
 			return c.recordError(err)
+		}
+		staged = append(staged, stagedModule{entry: entry, providerConfig: providerConfig})
+	}
+
+	// Commit. A module can still fail here (storage, shutdown); the modules
+	// already committed are then restored to their last accepted config.
+	for i, next := range staged {
+		if err := next.entry.module.Reconfigure(context.Background(), host, next.providerConfig); err != nil {
+			c.rollback(staged[:i])
+			return c.recordError(fmt.Errorf("provider %s: %w", next.entry.id, err))
 		}
 	}
 
@@ -147,9 +202,16 @@ func (c *Coordinator) reconfigure(rawConfig []byte) error {
 	}
 	byAuth, err := buildRegistry(owned)
 	if err != nil {
+		c.rollback(staged)
 		return c.recordError(err)
 	}
 	c.registry.swap(byAuth)
+
+	applied := make(map[string]appliedConfig, len(staged))
+	for _, next := range staged {
+		applied[next.entry.id] = appliedConfig{host: host, providerConfig: next.providerConfig}
+	}
+	c.applied = applied
 
 	if err := writeManifest(pluginAuthDir, c.modules); err != nil {
 		// Manifest is diagnostic-only; never authoritative for dispatch.
@@ -162,6 +224,20 @@ func (c *Coordinator) reconfigure(rawConfig []byte) error {
 	}
 	c.mu.Unlock()
 	return nil
+}
+
+// rollback restores each committed module to the config it last accepted.
+// It is best effort: a module with no accepted config, or one that refuses
+// its old config, keeps whatever it has, and the coordinator's rejected
+// mode keeps pick failing closed either way. Callers hold reconfigureMu.
+func (c *Coordinator) rollback(committed []stagedModule) {
+	for _, next := range committed {
+		previous, ok := c.applied[next.entry.id]
+		if !ok {
+			continue
+		}
+		_ = next.entry.module.Reconfigure(context.Background(), previous.host, previous.providerConfig)
+	}
 }
 
 func (c *Coordinator) recordError(err error) error {
@@ -193,10 +269,13 @@ func (c *Coordinator) validationStatus() string {
 // propagated verbatim.
 func (c *Coordinator) pick(req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
 	c.mu.RLock()
-	stopped := c.stopped
+	stopped, rejected := c.stopped, c.lastErr
 	c.mu.RUnlock()
 	if stopped {
 		return pluginapi.SchedulerPickResponse{}, fmt.Errorf("plugin is shutting down")
+	}
+	if rejected != nil {
+		return c.pickRejected(req, rejected)
 	}
 
 	var recognizing []moduleEntry
@@ -220,6 +299,25 @@ func (c *Coordinator) pick(req pluginapi.SchedulerPickRequest) (pluginapi.Schedu
 		}
 		return pluginapi.SchedulerPickResponse{}, fmt.Errorf("coordinator_mixed_provider_pick: candidates recognized by multiple providers: %s", strings.Join(ids, ", "))
 	}
+}
+
+// pickRejected answers picks while the most recent configuration is
+// rejected. The plugin stays registered as the host's scheduler, and every
+// candidate a hosted module recognizes, or that the last accepted registry
+// owned, gets a hard error. Only requests with none of those keep Handled:false, so
+// unrelated providers stay untouched.
+func (c *Coordinator) pickRejected(req pluginapi.SchedulerPickRequest, rejected error) (pluginapi.SchedulerPickResponse, error) {
+	for _, candidate := range req.Candidates {
+		if c.registry.providerFor(strings.TrimSpace(candidate.ID)) != "" {
+			return pluginapi.SchedulerPickResponse{}, &configRejectedError{reason: rejected.Error()}
+		}
+		for _, entry := range c.modules {
+			if entry.module.Recognize(candidate) {
+				return pluginapi.SchedulerPickResponse{}, &configRejectedError{reason: rejected.Error()}
+			}
+		}
+	}
+	return pluginapi.SchedulerPickResponse{Handled: false}, nil
 }
 
 // handleUsage dispatches strictly by registry lookup of record.AuthID,

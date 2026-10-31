@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- A rejected plugin config (parse error, unreadable CPA config, an enabled plugin missing from `coexisting-plugins`, bad auth dir) now keeps the plugin registered. Until a valid config is applied, every pick with a candidate a module recognizes or the last accepted config owned fails with `coordinator_config_rejected`, and the coordinator status reports `reconfigure_rejected`.
+- A config one provider module rejects no longer leaves the modules before it on the new config: modules validate before any of them commits, and a commit that fails part-way restores the ones already applied.
+- `deploy/verify-live.sh` and `deploy/verify-live-opencodego.sh` fail when the host's plugin snapshot does not list `subscription-pool` as registered and enabled, and `verify-live.sh` fails when the coordinator status is not `registered`.
+
 ## [0.7.1] - 2026-10-31
 
 ### Added

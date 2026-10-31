@@ -48,13 +48,32 @@ func (m *zaiModule) Reconfigure(_ context.Context, host providermodule.HostConfi
 	if err != nil {
 		return m.runtime.recordError(err)
 	}
-	cpa := cpaConfigProjection{
+	cpa := hostProjection(host)
+	providerKeys := cpaProviderKeys(cpa)
+	return m.runtime.reconfigureWithAccounts(cfg, host.AuthDir, cpa, providerKeys)
+}
+
+// ValidateConfig implements providermodule.ConfigValidator: it runs the
+// config parse and account discovery Reconfigure would, without opening
+// storage or touching the live snapshot.
+func (m *zaiModule) ValidateConfig(host providermodule.HostConfig, providerConfig json.RawMessage) error {
+	cfg, err := parsePluginConfig(providerConfig)
+	if err != nil {
+		return err
+	}
+	cpa := hostProjection(host)
+	if _, err := discoverAccounts(cpa, cfg); err != nil {
+		return redactError(err, cpaProviderKeys(cpa)...)
+	}
+	return nil
+}
+
+func hostProjection(host providermodule.HostConfig) cpaConfigProjection {
+	return cpaConfigProjection{
 		AuthDir:             host.AuthDir,
 		ClaudeKeys:          toSDKClaudeKeys(host.ClaudeKeys),
 		OpenAICompatibility: toSDKOpenAICompatibility(host.OpenAICompatibility),
 	}
-	providerKeys := cpaProviderKeys(cpa)
-	return m.runtime.reconfigureWithAccounts(cfg, host.AuthDir, cpa, providerKeys)
 }
 
 func (m *zaiModule) OwnedAuthIDs(_ context.Context) []string {

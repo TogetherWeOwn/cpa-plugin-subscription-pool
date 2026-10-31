@@ -123,6 +123,16 @@ type UsageRecognizer interface {
 	RecognizeUsage(record pluginapi.UsageRecord) bool
 }
 
+// ConfigValidator is optionally implemented by a Module that can check a
+// configuration without applying it. The coordinator stages every module's
+// new configuration through ValidateConfig before it calls Reconfigure on
+// any of them, so a configuration one module rejects never leaves the
+// modules before it running on the new configuration. ValidateConfig must
+// not change module state, open storage, or contact the network.
+type ConfigValidator interface {
+	ValidateConfig(host HostConfig, providerConfig json.RawMessage) error
+}
+
 // UsageAttributor is optionally implemented by a Module that can name the
 // account a usage record it accepted belongs to. The coordinator calls it
 // after HandleUsage, for its usage ledger only. The returned name must be a

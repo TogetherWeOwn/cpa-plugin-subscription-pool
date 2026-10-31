@@ -305,3 +305,36 @@ func TestAbsentDisabledAndInvalidReconfigure(t *testing.T) {
 		t.Fatalf("disabled provider active: %v", err)
 	}
 }
+
+// ValidateConfig must reject everything Reconfigure rejects before storage
+// is touched, and must leave a running module untouched.
+func TestValidateConfigMatchesReconfigureWithoutApplying(t *testing.T) {
+	m, _, h := configured(t, `{}`)
+	ids := m.OwnedAuthIDs(context.Background())
+	noKeys := testHost(h.AuthDir)
+	noKeys.OpenAICompatibility[0].APIKeyEntries = nil
+	relative := testHost("relative/auth")
+	for name, tc := range map[string]struct {
+		host providermodule.HostConfig
+		raw  string
+	}{
+		"parse error":       {h, `{"safety-margin-neurons":-1}`},
+		"no api key entry":  {noKeys, `{}`},
+		"guard disabled":    {h, `{"enabled":false}`},
+		"relative auth dir": {relative, `{}`},
+	} {
+		validateErr := m.ValidateConfig(tc.host, json.RawMessage(tc.raw))
+		if validateErr == nil {
+			t.Errorf("%s: ValidateConfig accepted a config Reconfigure rejects", name)
+		}
+		if err := NewModule().Reconfigure(context.Background(), tc.host, json.RawMessage(tc.raw)); err == nil {
+			t.Errorf("%s: Reconfigure accepted the config ValidateConfig rejected (%v)", name, validateErr)
+		}
+	}
+	if err := m.ValidateConfig(h, json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("ValidateConfig(valid) = %v", err)
+	}
+	if got := m.OwnedAuthIDs(context.Background()); len(got) != len(ids) {
+		t.Fatalf("ValidateConfig changed the live lanes: %v, want %v", got, ids)
+	}
+}
