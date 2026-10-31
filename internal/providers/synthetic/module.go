@@ -310,9 +310,15 @@ func (m *Module) Reconfigure(_ context.Context, host providermodule.HostConfig, 
 }
 
 // ValidateConfig implements providermodule.ConfigValidator. Reconfigure
-// only rejects a config it cannot parse, so that is all this checks.
+// only rejects a config it cannot parse, so that is all this checks, and
+// the rejection is recorded exactly as Reconfigure records it.
 func (m *Module) ValidateConfig(_ providermodule.HostConfig, providerConfig json.RawMessage) error {
 	_, err := parseConfig(providerConfig)
+	if err != nil {
+		m.mu.Lock()
+		m.lastErr = bounded(err.Error(), 256)
+		m.mu.Unlock()
+	}
 	return err
 }
 

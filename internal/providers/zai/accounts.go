@@ -65,6 +65,57 @@ func (g *stableIDGenerator) next(kind string, parts ...string) string {
 	return kind + ":" + short
 }
 
+// hostAuthIDs lists the auth IDs the host derives for every Z.ai Anthropic
+// key and zai-coding-plan entry, using the same ID generators as
+// discoverAccounts but none of its pairing checks, so it never fails.
+func hostAuthIDs(cpa cpaConfigProjection) []string {
+	var ids []string
+	legacyIDGen := newStableIDGenerator()
+	currentIDGen := newStableIDGenerator()
+	for i := range cpa.ClaudeKeys {
+		entry := cpa.ClaudeKeys[i]
+		key := strings.TrimSpace(entry.APIKey)
+		if key == "" {
+			continue
+		}
+		legacyID := legacyIDGen.next("claude:apikey", key, strings.TrimSpace(entry.BaseURL))
+		currentID := currentIDGen.next(
+			"claude:apikey",
+			key,
+			strings.TrimSpace(entry.BaseURL),
+			strings.TrimSpace(entry.ProxyURL),
+			strings.TrimSpace(entry.Prefix),
+			formatSortedHeaders(entry.Headers),
+		)
+		if _, recognized := recognizedBaseURL(entry.BaseURL, zaiAnthropicBaseURL); recognized {
+			ids = append(ids, legacyID, currentID)
+		}
+	}
+	openAIIDGen := newStableIDGenerator()
+	for i := range cpa.OpenAICompatibility {
+		compat := cpa.OpenAICompatibility[i]
+		if compat.Disabled {
+			continue
+		}
+		providerName := strings.ToLower(strings.TrimSpace(compat.Name))
+		if providerName == "" {
+			providerName = "openai-compatibility"
+		}
+		for j := range compat.APIKeyEntries {
+			entry := compat.APIKeyEntries[j]
+			key := strings.TrimSpace(entry.APIKey)
+			if key == "" {
+				continue
+			}
+			id := openAIIDGen.next("openai-compatibility:"+providerName, key, strings.TrimSpace(compat.BaseURL), strings.TrimSpace(entry.ProxyURL))
+			if providerName == zaiCompatName {
+				ids = append(ids, id)
+			}
+		}
+	}
+	return uniqueStrings(ids...)
+}
+
 // stableAuthID deliberately reproduces CLIProxyAPI's non-security
 // interoperability identifier. The host contract requires these exact bytes.
 func stableAuthID(kind string, parts ...string) string {

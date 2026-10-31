@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
-- A rejected plugin config (parse error, unreadable CPA config, an enabled plugin missing from `coexisting-plugins`, bad auth dir) now keeps the plugin registered. Until a valid config is applied, every pick with a candidate a module recognizes or the last accepted config owned fails with `coordinator_config_rejected`, and the coordinator status reports `reconfigure_rejected`.
+- A rejected plugin config (parse error, unreadable CPA config, an enabled plugin missing from `coexisting-plugins`, bad auth dir) now keeps the plugin registered. Until a valid config is applied, every pick with a candidate a module recognizes, the last accepted config owned, or the CPA config gives Z.ai fails with `coordinator_config_rejected`, and the coordinator status reports `reconfigure_rejected`. The rejecting module's own status (Z.ai, OpenCode Go, synthetic) reports it too, and a module that refuses its rollback is named in the status.
 - A config one provider module rejects no longer leaves the modules before it on the new config: modules validate before any of them commits, and a commit that fails part-way restores the ones already applied.
 - `deploy/verify-live.sh` and `deploy/verify-live-opencodego.sh` fail when the host's plugin snapshot does not list `subscription-pool` as registered and enabled, and `verify-live.sh` fails when the coordinator status is not `registered`.
 

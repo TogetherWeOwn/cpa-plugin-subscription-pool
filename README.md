@@ -271,6 +271,8 @@ The provider-specific settings below describe `providers.zai`; they are not defa
 
 A custom plan sets `plan: custom`, `five-hour-credits`, and `weekly-credits`. Suffixes must identify one full-key pair unambiguously; names must be unique.
 
+A rejected configuration never leaves modules half-applied and keeps the guards on. The causes are a parse error, an unreadable `cpa-config-path`, an enabled plugin missing from `coexisting-plugins`, a bad `auth-dir`, or a provider setting a module refuses. Every module validates the new configuration before any of them applies it, and the plugin stays registered as the host scheduler. Until a valid configuration is applied, any pick with a credential a module recognizes, that the last accepted configuration owned, or that the CPA config gives Z.ai fails with `coordinator_config_rejected`; other providers' credentials are left to the host. The plugin status (and the rejecting module's own status) reports `reconfigure_rejected` with a `validation_error`. Fix the configuration and reload to recover.
+
 Local state and non-secret settings are stored atomically under `<auth-dir>/subscription-pool/` (provider state under `providers/<module>/`, usage history under `usage/`). Directories are mode `0700`, files are mode `0600`, and provider keys are never persisted.
 
 ## Usage and Quota page

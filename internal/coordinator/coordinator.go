@@ -8,6 +8,7 @@ package coordinator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -43,6 +44,10 @@ type Coordinator struct {
 	mu      sync.RWMutex
 	lastErr error
 	stopped bool
+	// hostOwned holds the auth IDs the latest readable host config gives
+	// the HostCredentialOwner modules. Rejected mode blocks them as well,
+	// so they stay guarded before any configuration was accepted.
+	hostOwned map[string]struct{}
 
 	registry registry
 
@@ -143,6 +148,11 @@ func (c *Coordinator) reconfigure(rawConfig []byte) error {
 	if err != nil {
 		return c.recordError(err)
 	}
+	c.recordHostOwned(providermodule.HostConfig{
+		CPAConfigPath:       configPath,
+		ClaudeKeys:          cpa.ClaudeKeys,
+		OpenAICompatibility: cpa.OpenAICompatibility,
+	})
 	if err = validateSchedulerDeployment(cpa.Plugins, cfg.CoexistingPlugins); err != nil {
 		return c.recordError(err)
 	}
@@ -199,8 +209,7 @@ func (c *Coordinator) reconfigure(rawConfig []byte) error {
 	defer c.commitMu.Unlock()
 	for i, next := range staged {
 		if err := next.entry.module.Reconfigure(context.Background(), host, next.providerConfig); err != nil {
-			c.rollback(staged[:i])
-			return c.recordError(fmt.Errorf("provider %s: %w", next.entry.id, err))
+			return c.recordError(errors.Join(fmt.Errorf("provider %s: %w", next.entry.id, err), c.rollback(staged[:i])))
 		}
 	}
 
@@ -210,8 +219,7 @@ func (c *Coordinator) reconfigure(rawConfig []byte) error {
 	}
 	byAuth, err := buildRegistry(owned)
 	if err != nil {
-		c.rollback(staged)
-		return c.recordError(err)
+		return c.recordError(errors.Join(err, c.rollback(staged)))
 	}
 	c.registry.swap(byAuth)
 
@@ -237,16 +245,36 @@ func (c *Coordinator) reconfigure(rawConfig []byte) error {
 // rollback restores each committed module to the config it last accepted.
 // It is best effort: a module with no accepted config, or one that refuses
 // its old config, keeps whatever it has, and the coordinator's rejected
-// mode keeps pick failing closed either way. Callers hold reconfigureMu and
-// commitMu.
-func (c *Coordinator) rollback(committed []stagedModule) {
+// mode keeps pick failing closed either way. The returned error names each
+// module that refused, for status. Callers hold reconfigureMu and commitMu.
+func (c *Coordinator) rollback(committed []stagedModule) error {
+	var failed []error
 	for _, next := range committed {
 		previous, ok := c.applied[next.entry.id]
 		if !ok {
 			continue
 		}
-		_ = next.entry.module.Reconfigure(context.Background(), previous.host, previous.providerConfig)
+		if err := next.entry.module.Reconfigure(context.Background(), previous.host, previous.providerConfig); err != nil {
+			failed = append(failed, fmt.Errorf("rollback provider %s: %w", next.entry.id, err))
+		}
 	}
+	return errors.Join(failed...)
+}
+
+// recordHostOwned replaces hostOwned with the auth IDs host gives the
+// HostCredentialOwner modules.
+func (c *Coordinator) recordHostOwned(host providermodule.HostConfig) {
+	owned := make(map[string]struct{})
+	for _, entry := range c.modules {
+		if owner, ok := entry.module.(providermodule.HostCredentialOwner); ok {
+			for _, id := range owner.HostAuthIDs(host) {
+				owned[strings.TrimSpace(id)] = struct{}{}
+			}
+		}
+	}
+	c.mu.Lock()
+	c.hostOwned = owned
+	c.mu.Unlock()
 }
 
 func (c *Coordinator) recordError(err error) error {
@@ -280,13 +308,13 @@ func (c *Coordinator) pick(req pluginapi.SchedulerPickRequest) (pluginapi.Schedu
 	c.commitMu.RLock()
 	defer c.commitMu.RUnlock()
 	c.mu.RLock()
-	stopped, rejected := c.stopped, c.lastErr
+	stopped, rejected, hostOwned := c.stopped, c.lastErr, c.hostOwned
 	c.mu.RUnlock()
 	if stopped {
 		return pluginapi.SchedulerPickResponse{}, fmt.Errorf("plugin is shutting down")
 	}
 	if rejected != nil {
-		return c.pickRejected(req, rejected)
+		return c.pickRejected(req, rejected, hostOwned)
 	}
 
 	var recognizing []moduleEntry
@@ -314,12 +342,14 @@ func (c *Coordinator) pick(req pluginapi.SchedulerPickRequest) (pluginapi.Schedu
 
 // pickRejected answers picks while the most recent configuration is
 // rejected. The plugin stays registered as the host's scheduler, and every
-// candidate a hosted module recognizes, or that the last accepted registry
-// owned, gets a hard error. Only requests with none of those keep Handled:false, so
+// candidate a hosted module recognizes, that the last accepted registry
+// owned, or that the host config gives a HostCredentialOwner module, gets a
+// hard error. Only requests with none of those keep Handled:false, so
 // unrelated providers stay untouched.
-func (c *Coordinator) pickRejected(req pluginapi.SchedulerPickRequest, rejected error) (pluginapi.SchedulerPickResponse, error) {
+func (c *Coordinator) pickRejected(req pluginapi.SchedulerPickRequest, rejected error, hostOwned map[string]struct{}) (pluginapi.SchedulerPickResponse, error) {
 	for _, candidate := range req.Candidates {
-		if c.registry.providerFor(strings.TrimSpace(candidate.ID)) != "" {
+		id := strings.TrimSpace(candidate.ID)
+		if _, owned := hostOwned[id]; owned || c.registry.providerFor(id) != "" {
 			return pluginapi.SchedulerPickResponse{}, &configRejectedError{reason: rejected.Error()}
 		}
 		for _, entry := range c.modules {

@@ -128,9 +128,21 @@ type UsageRecognizer interface {
 // new configuration through ValidateConfig before it calls Reconfigure on
 // any of them, so a configuration one module rejects never leaves the
 // modules before it running on the new configuration. ValidateConfig must
-// not change module state, open storage, or contact the network.
+// not open storage or contact the network, and must not change module state
+// beyond recording a rejection for the module's status the way Reconfigure
+// would.
 type ConfigValidator interface {
 	ValidateConfig(host HostConfig, providerConfig json.RawMessage) error
+}
+
+// HostCredentialOwner is optionally implemented by a Module whose auth IDs
+// follow from the host config alone. While a configuration is rejected the
+// coordinator fails picks closed for these IDs too, so a provider the module
+// would guard stays guarded even before any configuration was accepted.
+// HostAuthIDs must not depend on the provider config, change module state,
+// or fail: it returns every auth ID the host config could give the provider.
+type HostCredentialOwner interface {
+	HostAuthIDs(host HostConfig) []string
 }
 
 // UsageAttributor is optionally implemented by a Module that can name the

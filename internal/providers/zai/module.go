@@ -55,17 +55,24 @@ func (m *zaiModule) Reconfigure(_ context.Context, host providermodule.HostConfi
 
 // ValidateConfig implements providermodule.ConfigValidator: it runs the
 // config parse and account discovery Reconfigure would, without opening
-// storage or touching the live snapshot.
+// storage or touching the live snapshot. A rejection is recorded exactly as
+// Reconfigure records it, so the zai status route reports it.
 func (m *zaiModule) ValidateConfig(host providermodule.HostConfig, providerConfig json.RawMessage) error {
 	cfg, err := parsePluginConfig(providerConfig)
 	if err != nil {
-		return err
+		return m.runtime.recordError(err)
 	}
 	cpa := hostProjection(host)
 	if _, err := discoverAccounts(cpa, cfg); err != nil {
-		return redactError(err, cpaProviderKeys(cpa)...)
+		return m.runtime.recordError(err, cpaProviderKeys(cpa)...)
 	}
 	return nil
+}
+
+// HostAuthIDs implements providermodule.HostCredentialOwner: every auth ID
+// the host config gives a Z.ai credential, paired or not.
+func (m *zaiModule) HostAuthIDs(host providermodule.HostConfig) []string {
+	return hostAuthIDs(hostProjection(host))
 }
 
 func hostProjection(host providermodule.HostConfig) cpaConfigProjection {
