@@ -382,3 +382,51 @@ func errString(err error) string {
 	}
 	return err.Error()
 }
+
+// The quota poller sends the account's API key as a bearer token to whatever
+// endpoint it is given. Anything other than the production Z.ai endpoint or a
+// plain-HTTP loopback test server must be refused before a request is built.
+func TestFetchQuotaRefusesToSendKeyToUnapprovedEndpoint(t *testing.T) {
+	now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
+	rejected := []string{
+		"https://evil.example/api/monitor/usage/quota/limit",
+		"https://api.z.ai.evil.example/api/monitor/usage/quota/limit",
+		"http://api.z.ai/api/monitor/usage/quota/limit",
+		"https://api.z.ai:8443/api/monitor/usage/quota/limit",
+		"https://user:pass@api.z.ai/api/monitor/usage/quota/limit",
+		"https://api.z.ai/api/monitor/usage/quota/limit?next=https://evil.example",
+		"https://api.z.ai/api/monitor/usage/quota/limit#fragment",
+		"https://api.z.ai/api/other",
+		"https://127.0.0.1/api/monitor/usage/quota/limit",
+		"http://localhost.evil.example/api/monitor/usage/quota/limit",
+		"http://10.0.0.1/api/monitor/usage/quota/limit",
+		"http://127.0.0.1:8080/quota?key=1",
+		"://bad",
+	}
+	for _, endpoint := range rejected {
+		t.Run(endpoint, func(t *testing.T) {
+			client := roundTripDoer(func(request *http.Request) (*http.Response, error) {
+				t.Fatalf("request sent to %s with Authorization %q", request.URL, request.Header.Get("Authorization"))
+				return nil, nil
+			})
+			_, err := fetchQuota(context.Background(), client, endpoint, quotaFixtureKey, now)
+			if err == nil || err.Error() != "invalid quota endpoint" {
+				t.Fatalf("err = %v, want invalid quota endpoint", err)
+			}
+		})
+	}
+
+	for _, endpoint := range []string{quotaEndpoint, "http://127.0.0.1:8080/quota", "http://localhost:8080/quota"} {
+		t.Run(endpoint, func(t *testing.T) {
+			var sent *http.Request
+			client := roundTripDoer(func(request *http.Request) (*http.Response, error) {
+				sent = request
+				return quotaHTTPResponse(http.StatusBadGateway, ""), nil
+			})
+			_, _ = fetchQuota(context.Background(), client, endpoint, quotaFixtureKey, now)
+			if sent == nil || sent.URL.String() != endpoint || sent.Header.Get("Authorization") != "Bearer "+quotaFixtureKey {
+				t.Fatalf("approved endpoint not requested correctly: %#v", sent)
+			}
+		})
+	}
+}
