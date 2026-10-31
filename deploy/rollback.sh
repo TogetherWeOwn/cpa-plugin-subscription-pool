@@ -2,6 +2,25 @@
 set -euo pipefail
 
 : "${CLIPROXY_MANAGEMENT_URL:=http://127.0.0.1:8317}"
+# Test harness only (deploy/hermetic.py): when set, this ephemeral loopback stub
+# is the sole approved management origin and the live port is refused, so a
+# test whose curl stub is bypassed can never reach live CLIProxy. It accepts
+# only fixture- management keys, so a real key is never sent to it. Never set
+# it on a host run.
+: "${CLIPROXY_TEST_MANAGEMENT_ORIGIN:=}"
+if test -n "$CLIPROXY_TEST_MANAGEMENT_ORIGIN"; then
+  python3 - "$CLIPROXY_TEST_MANAGEMENT_ORIGIN" <<'PY'
+import sys, urllib.parse
+value=sys.argv[1]
+parsed=urllib.parse.urlsplit(value)
+try:
+    port=parsed.port
+except ValueError:
+    port=None
+if parsed.scheme != "http" or parsed.hostname != "127.0.0.1" or port is None or not 32768 <= port <= 65535 or value != f"http://127.0.0.1:{port}":
+    raise SystemExit("CLIPROXY_TEST_MANAGEMENT_ORIGIN must be http://127.0.0.1:<ephemeral port 32768-65535>; the live port is never a test origin")
+PY
+fi
 : "${CLIPROXY_CONFIG:=/home/ubuntu/stacks/cliproxy/config.yaml}"
 : "${CLIPROXY_BACKUP:?set CLIPROXY_BACKUP to the recorded pre-install backup}"
 : "${CLIPROXY_MANAGEMENT_KEY_FILE:=}"
@@ -32,8 +51,8 @@ fi
 umask 077
 management_url="${CLIPROXY_MANAGEMENT_URL%/}/v0/management/plugins/subscription-pool"
 python3 - "$CLIPROXY_MANAGEMENT_URL" "$management_url" <<'PY'
-import sys, urllib.parse
-allowed={"http://127.0.0.1:8317", "http://[::1]:8317", "http://localhost:8317"}
+import os, sys, urllib.parse
+allowed={os.environ["CLIPROXY_TEST_MANAGEMENT_ORIGIN"]} if os.environ.get("CLIPROXY_TEST_MANAGEMENT_ORIGIN") else {"http://127.0.0.1:8317", "http://[::1]:8317", "http://localhost:8317"}
 def origin(value):
     parsed=urllib.parse.urlsplit(value)
     if parsed.scheme not in {"http","https"} or not parsed.hostname or parsed.username or parsed.password:
@@ -112,6 +131,8 @@ else:
     key=key_path.read_text().strip()
     if not key or '\n' in key or '\r' in key:
         raise SystemExit('management key file must contain one non-empty line')
+if os.environ.get("CLIPROXY_TEST_MANAGEMENT_ORIGIN") and not key.startswith("fixture-"):
+    raise SystemExit("CLIPROXY_TEST_MANAGEMENT_ORIGIN accepts only fixture- management keys; a real key never leaves for a test origin")
 path=pathlib.Path(sys.argv[2])
 path.write_text('header = "Authorization: Bearer ' + key.replace('\\', '\\\\').replace('"', '\\"') + '"\n')
 path.chmod(0o600)
