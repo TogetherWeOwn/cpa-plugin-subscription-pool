@@ -125,6 +125,27 @@ class HermeticTest(unittest.TestCase):
                     self.assertIn("CLIPROXY_TEST_MANAGEMENT_ORIGIN must be", completed.stderr)
                     self.assertFalse(log.exists())
 
+    def test_test_origin_never_receives_a_real_management_key(self):
+        for script in SCRIPTS:
+            with self.subTest(script=script), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                bin_dir, log = self.recording_curl(root)
+                env = self.script_env(
+                    root,
+                    PATH=f"{bin_dir}:{os.environ['PATH']}",
+                    CLIPROXY_MANAGEMENT_KEY_FILE="",
+                    CLIPROXY_MANAGEMENT_KEY="real-looking-management-key",
+                    CLIPROXY_CONFIG_UID=str(os.getuid()),
+                    CLIPROXY_CONFIG_GID=str(os.getgid()),
+                )
+                (root / "config.yaml").write_text("current\n")
+                completed = subprocess.run(
+                    [str(ROOT / "deploy" / script)], cwd=ROOT, env=env, text=True, capture_output=True
+                )
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn("accepts only fixture- management keys", completed.stderr)
+                self.assertFalse(log.exists(), "curl ran with a non-fixture key")
+
     def test_bypassed_stub_reaches_only_the_test_origin(self):
         # Reproduces the incident: a BASH_ENV file resets PATH, so the stub dir
         # is dropped and the real curl runs. The request must land on the test

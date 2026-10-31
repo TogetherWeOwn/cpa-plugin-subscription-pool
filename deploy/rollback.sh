@@ -4,8 +4,9 @@ set -euo pipefail
 : "${CLIPROXY_MANAGEMENT_URL:=http://127.0.0.1:8317}"
 # Test harness only (deploy/hermetic.py): when set, this ephemeral loopback stub
 # is the sole approved management origin and the live port is refused, so a
-# test whose curl stub is bypassed can never reach live CLIProxy. Never set it
-# on a host run.
+# test whose curl stub is bypassed can never reach live CLIProxy. It accepts
+# only fixture- management keys, so a real key is never sent to it. Never set
+# it on a host run.
 : "${CLIPROXY_TEST_MANAGEMENT_ORIGIN:=}"
 if test -n "$CLIPROXY_TEST_MANAGEMENT_ORIGIN"; then
   python3 - "$CLIPROXY_TEST_MANAGEMENT_ORIGIN" <<'PY'
@@ -130,6 +131,8 @@ else:
     key=key_path.read_text().strip()
     if not key or '\n' in key or '\r' in key:
         raise SystemExit('management key file must contain one non-empty line')
+if os.environ.get("CLIPROXY_TEST_MANAGEMENT_ORIGIN") and not key.startswith("fixture-"):
+    raise SystemExit("CLIPROXY_TEST_MANAGEMENT_ORIGIN accepts only fixture- management keys; a real key never leaves for a test origin")
 path=pathlib.Path(sys.argv[2])
 path.write_text('header = "Authorization: Bearer ' + key.replace('\\', '\\\\').replace('"', '\\"') + '"\n')
 path.chmod(0o600)
