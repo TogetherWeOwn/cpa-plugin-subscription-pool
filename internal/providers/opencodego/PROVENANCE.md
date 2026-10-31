@@ -50,7 +50,7 @@ The initial poller above bound one `dashboard-api-key` to the whole module and p
 
 Fixed by moving `dashboard-api-key` onto `accounts[]` (falling back to the module-level key when an account omits its own, for the common case where accounts genuinely share one key) and polling each account with its own key, concurrently, each throttled independently by `minPollInterval`. One account's poll failure or missing key no longer affects any other account's result.
 
-## 2026-10-31 — Background poller (TWO-335 M2)
+## 2026-10-31 — Background poller
 
 Polling from `Status()` meant freshness depended on someone viewing status: with nobody viewing it, `threshold-percent` was never enforced, and an exhausted poll reading stayed in place past the window's reset. The unauthenticated usage resource also reaches `Status()`, so any caller could trigger outbound polls carrying the dashboard key.
 

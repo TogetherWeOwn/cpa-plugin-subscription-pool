@@ -342,7 +342,7 @@ func TestInfiniteConcurrencyCap(t *testing.T) {
 	}
 }
 
-// TestPaidLaneRefusedWithoutQuotaReading pins TWO-335 M1: with no weekly
+// TestPaidLaneRefusedWithoutQuotaReading is a regression test: with no weekly
 // reading at all (polling off or failing, no x-synthetic-quotas header) the
 // threshold cannot be checked, so the paid lane is never admitted.
 func TestPaidLaneRefusedWithoutQuotaReading(t *testing.T) {
@@ -362,7 +362,7 @@ func TestPaidLaneRefusedWithoutQuotaReading(t *testing.T) {
 	}
 }
 
-// TestPaidLaneRefusedOnceReadingIsStale pins TWO-335 M1: a reading that
+// TestPaidLaneRefusedOnceReadingIsStale is a regression test: a reading that
 // stops being refreshed stops admitting the paid lane after quota-max-age,
 // however low it was, until a fresh reading arrives.
 func TestPaidLaneRefusedOnceReadingIsStale(t *testing.T) {

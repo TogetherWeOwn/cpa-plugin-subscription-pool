@@ -54,7 +54,7 @@ func pickAt(module *Module, now time.Time, ids ...string) (pluginapi.SchedulerPi
 	})
 }
 
-// TestStatusNeverPolls pins TWO-335 M2: Status, which the unauthenticated
+// TestStatusNeverPolls is a regression test: Status, which the unauthenticated
 // usage resource reaches, reads cached state and sends no dashboard request.
 func TestStatusNeverPolls(t *testing.T) {
 	now := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
@@ -74,7 +74,7 @@ func TestStatusNeverPolls(t *testing.T) {
 	}
 }
 
-// TestBackgroundPollerEnforcesThresholdWithoutStatus pins TWO-335 M2: the
+// TestBackgroundPollerEnforcesThresholdWithoutStatus is a regression test: the
 // poller refreshes usage on its own, so an exhausted account is refused
 // although nobody has viewed status.
 func TestBackgroundPollerEnforcesThresholdWithoutStatus(t *testing.T) {
@@ -114,7 +114,7 @@ func TestBackgroundPollerEnforcesThresholdWithoutStatus(t *testing.T) {
 	}
 }
 
-// TestPollWindowsExpireAtTheirReset pins TWO-335 M2: an exhausted or
+// TestPollWindowsExpireAtTheirReset is a regression test: an exhausted or
 // over-threshold reading never parks the account past the window's reset.
 func TestPollWindowsExpireAtTheirReset(t *testing.T) {
 	now := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
