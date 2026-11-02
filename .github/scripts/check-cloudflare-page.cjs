@@ -20,6 +20,24 @@ const assert = require('node:assert/strict');
   let browser;
   const errors = [];
   try {
+    // The calendar projection (days in the current UTC month x 10,000 daily
+    // neurons) varies by month, so read the expectation from the exported
+    // usage.json fixture instead of hardcoding it. The export was written by
+    // the host matrix moments earlier; recomputing from the clock here would
+    // flake on runs straddling UTC midnight on the 1st. This stays inside the
+    // try so a missing or invalid fixture still reaches the finally below
+    // that closes the listening server (otherwise Node would hang with an
+    // exit code set but the event loop alive).
+    const usage = JSON.parse(fs.readFileSync(path.join(root, 'usage.json'), 'utf8'));
+    const fixtureCard = (usage.quota || []).find(q => q.provider === 'cloudflare-workers-ai');
+    assert(fixtureCard, 'usage.json must contain a cloudflare-workers-ai quota card');
+    const allowance = (fixtureCard.metrics || []).find(m => m.key === 'calendar_daily_allowances');
+    assert(allowance, 'usage.json cloudflare-workers-ai card must contain a calendar_daily_allowances metric');
+    assert(
+      Number.isInteger(allowance.value) && allowance.value % 10000 === 0 && allowance.value >= 280000 && allowance.value <= 310000,
+      `calendar_daily_allowances must be a whole multiple of 10000 between 280000 and 310000, got ${allowance.value}`
+    );
+    const expectedAllowance = String(allowance.value);
     browser = await chromium.launch({ headless: true, executablePath: chromium.executablePath(), args: ['--no-sandbox'], timeout: 30000 });
     for (const [name, width, height, theme] of [
       ['desktop-light', 1280, 960, 'light'], ['mobile-dark', 390, 844, 'dark']
@@ -32,7 +50,7 @@ const assert = require('node:assert/strict');
       const card = page.locator('.qcard').filter({ hasText: 'Cloudflare Workers AI' });
       assert.equal(await card.count(), 1, 'one Cloudflare account card');
       const text = await card.innerText();
-      for (const wanted of ['Included-only (daily; no rollover)', 'Local debits (conservative)', '9208', 'Calendar daily allowances (not pooled)', '310000', 'not a billing guarantee']) {
+      for (const wanted of ['Included-only (daily; no rollover)', 'Local debits (conservative)', '9208', 'Calendar daily allowances (not pooled)', expectedAllowance, 'not a billing guarantee']) {
         assert(text.includes(wanted), `missing quota text: ${wanted}`);
       }
       assert(!text.includes('100% left'), 'exhausted guard must not advertise a full allowance');
