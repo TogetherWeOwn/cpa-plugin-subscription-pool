@@ -9,7 +9,7 @@ RELEASE_SHA ?= $(shell git rev-parse HEAD)
 COMPATIBILITY_EVIDENCE ?= .github/host-images.json
 DEPLOY_DIR ?= ../../plugins/linux/amd64
 
-.PHONY: fmt-check vet lint test test-release validate-source scan-secrets validate-release build-host-integration test-host-image test-host-matrix build package deploy clean
+.PHONY: fmt-check vet lint test test-release validate-source scan-secrets validate-release build-host-integration test-host-extract test-host-image test-host-matrix build package deploy clean
 
 fmt-check:
 	test -z "$$(gofmt -l .)"
@@ -40,6 +40,9 @@ validate-release:
 
 build-host-integration:
 	$(GO) build -buildvcs=false -o .github/scripts/host-integration/host-integration ./.github/scripts/host-integration
+
+test-host-extract:
+	.github/scripts/extract-host-image_test.sh
 
 test-host-image: build-host-integration
 	test -n "$(HOST_BINARY)"
